@@ -1,4 +1,4 @@
-// The scene-setter engine: DMX buffer, Avo failover, and an HTP scene-layer
+// The scene-setter engine: DMX buffer, console failover, and an HTP scene-layer
 // playback model.
 //
 // Playback model (HTP — Highest Takes Precedence):
@@ -10,13 +10,13 @@
 //     holding up; channels still held by another layer stay up. A channel stored
 //     as 0 in a layer never pulls anything down (max ignores it).
 //
-// Avo failover:
-//   - While the Avo console broadcasts Art-Net it owns the rig; the Pi stops
+// console failover:
+//   - While the console console broadcasts Art-Net it owns the rig; the Pi stops
 //     outputting (piOutputEnabled = false) but still captures the desk's levels so
 //     a record snapshots what's on stage.
-//   - When the Avo falls silent past avoTimeoutMs, the Pi takes over: it restores
+//   - When the console falls silent past consoleTimeoutMs, the Pi takes over: it restores
 //     the layers that were on (fading them up), or the default scene if none.
-//   - Scene control is BLOCKED while the Avo is live. Recording IS allowed.
+//   - Scene control is BLOCKED while the console is live. Recording IS allowed.
 
 const now = () => Date.now();
 
@@ -48,11 +48,11 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   // Persisted: which scene ids were on (restored on boot).
   const persisted = store.readJSON(config.stateFile, {});
   const state = {
-    avoActive: false, // effective state (override applied) — drives behaviour & feedback
-    avoDetected: false, // raw network detection (packets + watchdog)
-    avoOverride: "auto", // "auto" | "on" | "off" — not persisted (resets to auto on boot)
+    consoleActive: false, // effective state (override applied) — drives behaviour & feedback
+    consoleDetected: false, // raw network detection (packets + watchdog)
+    consoleOverride: "auto", // "auto" | "on" | "off" — not persisted (resets to auto on boot)
     piOutputEnabled: true,
-    lastAvoPacket: 0,
+    lastConsolePacket: 0,
     activeScenes: Array.isArray(persisted.activeScenes)
       ? persisted.activeScenes.filter((id) => scenes[id])
       : [],
@@ -79,7 +79,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   }
 
   // Internal fade-out-only layer holding the desk's last output, used to crossfade
-  // FROM the desk look INTO the building look on Avo handoff. Not a real scene, so
+  // FROM the desk look INTO the building look on console handoff. Not a real scene, so
   // it never appears in scenes feedback / active-scenes / persistence.
   const DESK_LAYER = "__desk__";
 
@@ -236,26 +236,26 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   // ---------------- FEEDBACK ----------------
 
   function broadcastTop() {
-    // avo-active is the COMPUTED/effective state (override applied).
-    sendOsc("/scene-setter/avo-active", [{ type: "i", value: state.avoActive ? 1 : 0 }]);
-    sendOsc("/scene-setter/avo-override", [{ type: "s", value: state.avoOverride }]);
-    pushVar("avo_override", state.avoOverride, "s");
+    // console-active is the COMPUTED/effective state (override applied).
+    sendOsc("/scene-setter/console-active", [{ type: "i", value: state.consoleActive ? 1 : 0 }]);
+    sendOsc("/scene-setter/console-override", [{ type: "s", value: state.consoleOverride }]);
+    pushVar("console_override", state.consoleOverride, "s");
     sendOsc("/scene-setter/pi-output", [{ type: "i", value: state.piOutputEnabled ? 1 : 0 }]);
     sendOsc("/scene-setter/status", [
       {
         type: "s",
-        value: state.avoActive ? "PRODUCTION_CONSOLE_ACTIVE" : "BUILDING_CONTROL_ACTIVE",
+        value: state.consoleActive ? "PRODUCTION_CONSOLE_ACTIVE" : "BUILDING_CONTROL_ACTIVE",
       },
     ]);
     sendOsc("/scene-setter/active-scenes", [{ type: "s", value: onIds().join(",") }]);
-    pushVar("avo_active", state.avoActive ? 1 : 0, "i");
+    pushVar("console_active", state.consoleActive ? 1 : 0, "i");
     pushVar("active_scenes", onIds().join(","), "s");
   }
 
   // Tri-state per scene: 0 = off, 1 = on (settled), 2 = fading (in or out).
   // Always 0 while the desk is in control or Pi output is disabled.
   function sceneState(id) {
-    if (state.avoActive || !state.piOutputEnabled) return 0;
+    if (state.consoleActive || !state.piOutputEnabled) return 0;
     const L = layers[id];
     if (!L) return 0;
     if (L.level !== L.target) return 2;
@@ -317,67 +317,67 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     store.writeJSONAtomic(config.stateFile, { activeScenes: onIds() });
   }
 
-  // ---------------- AVO FAILOVER ----------------
+  // ---------------- CONSOLE FAILOVER ----------------
 
-  // Effective Avo state = override if forced, else the network detection.
-  function effectiveAvo() {
-    if (state.avoOverride === "on") return true;
-    if (state.avoOverride === "off") return false;
-    return state.avoDetected;
+  // Effective console state = override if forced, else the network detection.
+  function effectiveConsole() {
+    if (state.consoleOverride === "on") return true;
+    if (state.consoleOverride === "off") return false;
+    return state.consoleDetected;
   }
 
-  function recomputeAvo() {
-    applyAvoActive(effectiveAvo());
+  function recomputeConsole() {
+    applyConsoleActive(effectiveConsole());
   }
 
   // mode: "on" (force live) | "off" (force ignore desk) | "auto" (network detection)
-  function setAvoOverride(mode) {
+  function setConsoleOverride(mode) {
     if (!["on", "off", "auto"].includes(mode)) mode = "auto";
-    state.avoOverride = mode;
-    logger.info(`Avo override set to ${mode}`);
-    recomputeAvo(); // apply any change to the effective state
+    state.consoleOverride = mode;
+    logger.info(`console override set to ${mode}`);
+    recomputeConsole(); // apply any change to the effective state
     broadcastTop(); // always publish the override + effective state
   }
 
-  function applyAvoActive(active) {
-    if (state.avoActive === active) return;
-    state.avoActive = active;
+  function applyConsoleActive(active) {
+    if (state.consoleActive === active) return;
+    state.consoleActive = active;
 
     if (active) {
       stopRender(); // desk takes over; stop Pi rendering (levels/targets are kept)
       state.piOutputEnabled = false;
-      logger.info("Avo active → Pi output disabled (desk in control)");
+      logger.info("console active → Pi output disabled (desk in control)");
       broadcastState();
     } else {
       state.piOutputEnabled = true;
       // Crossfade FROM the desk's last look (captured) INTO the building look —
       // the building layers rise from 0 while the desk snapshot falls, so there's
       // no flash to black.
-      captureDeskLayer(config.defaultFadeOnAvoLost);
+      captureDeskLayer(config.defaultFadeOnConsoleLost);
       const restore = onIds();
-      if (restore.length === 0 && scenes[config.defaultSceneOnAvoLost]) {
-        logger.info(`Avo lost → crossfading to default scene ${config.defaultSceneOnAvoLost}`);
-        setLayer(config.defaultSceneOnAvoLost, true, config.defaultFadeOnAvoLost, 0);
+      if (restore.length === 0 && scenes[config.defaultSceneOnConsoleLost]) {
+        logger.info(`console lost → crossfading to default scene ${config.defaultSceneOnConsoleLost}`);
+        setLayer(config.defaultSceneOnConsoleLost, true, config.defaultFadeOnConsoleLost, 0);
       } else {
-        logger.info(`Avo lost → crossfading to scenes [${restore.join(",")}]`);
-        for (const id of restore) setLayer(id, true, config.defaultFadeOnAvoLost, 0);
+        logger.info(`console lost → crossfading to scenes [${restore.join(",")}]`);
+        for (const id of restore) setLayer(id, true, config.defaultFadeOnConsoleLost, 0);
       }
       persist();
       commit();
     }
   }
 
-  // Hot path: NO disk writes. While the Avo is live, current holds desk levels but
+  // Hot path: NO disk writes. While the console is live, current holds desk levels but
   // outputAll is suppressed (piOutputEnabled = false).
   function onDmx(universe, packet, length) {
-    state.lastAvoPacket = now();
-    if (!state.avoDetected) {
-      state.avoDetected = true;
-      recomputeAvo();
+    state.lastConsolePacket = now();
+    if (!state.consoleDetected) {
+      state.consoleDetected = true;
+      recomputeConsole();
     }
-    // If the effective Avo state is off (e.g. forced off), ignore the desk's data
+    // If the effective console state is off (e.g. forced off), ignore the desk's data
     // entirely — don't let it corrupt the Pi's own render.
-    if (!state.avoActive) return;
+    if (!state.consoleActive) return;
 
     const n = Math.min(length, C, packet.length - 18);
     const buf = current[universe];
@@ -386,9 +386,9 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
 
   // ---------------- SCENE COMMANDS ----------------
 
-  function avoBlocked(action) {
-    logger.warn(`${action} ignored — Avo console is live`);
-    sendOsc("/scene-setter/error", [{ type: "s", value: "Avo active — scene control disabled" }]);
+  function consoleBlocked(action) {
+    logger.warn(`${action} ignored — console console is live`);
+    sendOsc("/scene-setter/error", [{ type: "s", value: "console active — scene control disabled" }]);
   }
 
   function sceneMissing(id) {
@@ -409,7 +409,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   }
 
   function setSceneState(id, on, fade) {
-    if (state.avoActive) return void avoBlocked(`Scene ${id} ${on ? "on" : "off"}`);
+    if (state.consoleActive) return void consoleBlocked(`Scene ${id} ${on ? "on" : "off"}`);
     if (!scenes[id]) return void sceneMissing(id);
     if (on) state.piOutputEnabled = true;
     setLayer(id, on, fade);
@@ -434,7 +434,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
 
   // Exclusive recall ("full look"): this scene on, all others off.
   function sceneSolo(id, fade) {
-    if (state.avoActive) return void avoBlocked(`Solo scene ${id}`);
+    if (state.consoleActive) return void consoleBlocked(`Solo scene ${id}`);
     if (!scenes[id]) return void sceneMissing(id);
     state.piOutputEnabled = true;
     for (const other of Object.keys(layers)) {
@@ -456,8 +456,8 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   // ---------------- OUTPUT MASTER ----------------
 
   function enableOutput() {
-    if (state.avoActive) {
-      sendOsc("/scene-setter/error", [{ type: "s", value: "Avo active — output controlled by desk" }]);
+    if (state.consoleActive) {
+      sendOsc("/scene-setter/error", [{ type: "s", value: "console active — output controlled by desk" }]);
       return;
     }
     state.piOutputEnabled = true;
@@ -492,11 +492,11 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
       return void scenesOff(resolveFade(msg, parts[2]));
     }
 
-    // /scene-setter/avo-override  arg 0=off, 1=on, 2/none=auto
-    if (cmd === "scene-setter" && parts[1] === "avo-override") {
+    // /scene-setter/console-override  arg 0=off, 1=on, 2/none=auto
+    if (cmd === "scene-setter" && parts[1] === "console-override") {
       const raw = resolveNumber(msg, parts[2]);
       const mode = raw === 1 ? "on" : raw === 0 ? "off" : "auto";
-      return void setAvoOverride(mode);
+      return void setConsoleOverride(mode);
     }
 
     if (cmd === "state") return void broadcastState();
@@ -541,10 +541,10 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
 
   function start() {
     const watchdog = setInterval(() => {
-      if (!state.avoDetected) return;
-      if (now() - state.lastAvoPacket >= config.avoTimeoutMs) {
-        state.avoDetected = false;
-        recomputeAvo();
+      if (!state.consoleDetected) return;
+      if (now() - state.lastConsolePacket >= config.consoleTimeoutMs) {
+        state.consoleDetected = false;
+        recomputeConsole();
       }
     }, 100);
 
@@ -552,23 +552,23 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
 
     const feedbackHeartbeat = setInterval(broadcastState, config.feedbackHeartbeatMs);
 
-    // On boot, wait briefly for the Avo to announce itself before lighting up.
+    // On boot, wait briefly for the console to announce itself before lighting up.
     const startupTimer = setTimeout(() => {
-      if (state.avoActive) {
-        logger.info("Startup: Avo detected, desk in control");
+      if (state.consoleActive) {
+        logger.info("Startup: console detected, desk in control");
         return;
       }
       const restore = state.activeScenes.filter((id) => scenes[id]);
       if (restore.length) {
-        logger.info(`Startup: no Avo, restoring scenes [${restore.join(",")}]`);
-        for (const id of restore) setLayer(id, true, config.defaultFadeOnAvoLost, 0);
+        logger.info(`Startup: no console, restoring scenes [${restore.join(",")}]`);
+        for (const id of restore) setLayer(id, true, config.defaultFadeOnConsoleLost, 0);
         commit();
-      } else if (scenes[config.defaultSceneOnAvoLost]) {
-        logger.info(`Startup: no Avo, recalling default scene ${config.defaultSceneOnAvoLost}`);
-        setLayer(config.defaultSceneOnAvoLost, true, config.defaultFadeOnAvoLost, 0);
+      } else if (scenes[config.defaultSceneOnConsoleLost]) {
+        logger.info(`Startup: no console, recalling default scene ${config.defaultSceneOnConsoleLost}`);
+        setLayer(config.defaultSceneOnConsoleLost, true, config.defaultFadeOnConsoleLost, 0);
         commit();
       } else {
-        logger.info("Startup: no Avo, and no scene to recall yet");
+        logger.info("Startup: no console, and no scene to recall yet");
       }
     }, config.startupGraceMs);
 

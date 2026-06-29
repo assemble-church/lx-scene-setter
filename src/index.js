@@ -41,7 +41,7 @@ logger.info(`Config:       ${config.configPath}`);
 logger.info(`OSC in:       ${config.oscPort}`);
 logger.info(`Art-Net in/out: ${config.artnetPort}`);
 logger.info(`Universes:    ${config.universes}`);
-logger.info(`Avo IP:       ${config.avoIp} (timeout ${config.avoTimeoutMs}ms)`);
+logger.info(`console IP:       ${config.consoleIp} (timeout ${config.consoleTimeoutMs}ms)`);
 
 // ---------------- SHUTDOWN ----------------
 // We intentionally do NOT blackout on exit — leave the rig at its last look so a

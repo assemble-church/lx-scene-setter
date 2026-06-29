@@ -1,7 +1,7 @@
 // Art-Net I/O.
 //
 // Output: builds and sends ArtDMX packets to configured nodes.
-// Input:  listens for ArtDMX from the Avo console (to record), and answers
+// Input:  listens for ArtDMX from the console console (to record), and answers
 //         ArtPoll discovery with ArtPollReply so controllers/tools can find us
 //         and a unicasting desk will send us the universes we advertise.
 //
@@ -134,7 +134,7 @@ function buildPollReply(config, localIp, mac, universes, page) {
   return buf;
 }
 
-// onDmx(universe, packet, length) is called for valid ArtDMX from the Avo.
+// onDmx(universe, packet, length) is called for valid ArtDMX from the console.
 function createArtnetInput(config, logger, onDmx) {
   const socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
   socket.on("error", (err) => logger.error("Art-Net in socket error:", err.message));
@@ -145,7 +145,7 @@ function createArtnetInput(config, logger, onDmx) {
     .filter((u) => Number.isInteger(u) && u >= 0 && u < 32768)
     .sort((a, b) => a - b);
 
-  const iface = pickIface(config.avoIp);
+  const iface = pickIface(config.consoleIp);
   const localIp = config.artnetIp || (iface && iface.address) || "0.0.0.0";
   const mac = iface && iface.mac;
   const seenUniverses = new Set();
@@ -172,7 +172,7 @@ function createArtnetInput(config, logger, onDmx) {
     }
 
     if (opcode !== OP_DMX) return;
-    if (rinfo.address !== config.avoIp) return; // only record the desk's DMX
+    if (rinfo.address !== config.consoleIp) return; // only record the desk's DMX
     if (packet.length < HEADER_LEN) return;
 
     const universe = packet.readUInt16LE(14);
@@ -181,14 +181,14 @@ function createArtnetInput(config, logger, onDmx) {
 
     if (!seenUniverses.has(universe)) {
       seenUniverses.add(universe);
-      logger.info(`Art-Net: receiving universe ${universe} from desk ${config.avoIp}`);
+      logger.info(`Art-Net: receiving universe ${universe} from desk ${config.consoleIp}`);
     }
 
     onDmx(universe, packet, length);
   });
 
   socket.bind(config.artnetPort, "0.0.0.0", () => {
-    logger.info(`Listening for Avo Art-Net on :${config.artnetPort} from ${config.avoIp}`);
+    logger.info(`Listening for console Art-Net on :${config.artnetPort} from ${config.consoleIp}`);
     if (advertised.length) {
       logger.info(
         `ArtPoll: advertising output universes [${advertised.join(",")}] as ${localIp}`

@@ -3,7 +3,7 @@
 // The config FILE (config.jsonc) is grouped by concern and may contain // and
 // /* */ comments (JSONC). This loader strips comments, deep-merges over the
 // defaults, then NORMALISES the grouped shape into the flat property names the
-// rest of the codebase already uses (config.avoIp, config.oscPort, …). So the
+// rest of the codebase already uses (config.consoleIp, config.oscPort, …). So the
 // file stays human-friendly while the internal contract stays stable.
 //
 // File path: $SCENE_SETTER_CONFIG, else config.jsonc (preferred) or config.json
@@ -27,12 +27,12 @@ const CONFIG_PATH = resolveConfigPath();
 
 // ---- Defaults, in the grouped FILE shape ----
 const FILE_DEFAULTS = {
-  // The Avolites production console we fail over from.
-  avo: {
+  // The lighting console we fail over from.
+  console: {
     ip: "10.10.20.10", // desk's IP — also the source filter for recording
     timeoutMs: 1000, // silence before the desk is considered "lost"
     defaultScene: "1", // scene to recall on handoff when nothing else is on
-    defaultFade: 3, // crossfade time (seconds) on Avo handoff / startup
+    defaultFade: 3, // crossfade time (seconds) on console handoff / startup
   },
 
   // Art-Net (DMX) network.
@@ -155,10 +155,10 @@ function loadConfig() {
     artnetPort: f.artnet.port,
     artnetIp: f.artnet.localIp,
 
-    avoIp: f.avo.ip,
-    avoTimeoutMs: f.avo.timeoutMs,
-    defaultSceneOnAvoLost: f.avo.defaultScene,
-    defaultFadeOnAvoLost: f.avo.defaultFade,
+    consoleIp: f.console.ip,
+    consoleTimeoutMs: f.console.timeoutMs,
+    defaultSceneOnConsoleLost: f.console.defaultScene,
+    defaultFadeOnConsoleLost: f.console.defaultFade,
 
     oscPort: f.companion.listenPort,
     oscFeedbackTargets: f.companion.feedbackTargets,
@@ -197,8 +197,8 @@ function validate(config) {
   if (!Number.isInteger(config.channels) || config.channels < 1 || config.channels > 512) {
     errors.push("artnet.channels must be an integer between 1 and 512");
   }
-  if (typeof config.avoIp !== "string") {
-    errors.push("avo.ip must be a string");
+  if (typeof config.consoleIp !== "string") {
+    errors.push("console.ip must be a string");
   }
   if (!Array.isArray(config.outputs) || config.outputs.length === 0) {
     errors.push("artnet.outputs must be a non-empty array");

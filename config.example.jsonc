@@ -1,10 +1,10 @@
 {
-  // ── Avolites production console (the desk we fail over from) ──────────────
-  "avo": {
+  // ── Lighting console (the desk we fail over from) ─────────────────────────
+  "console": {
     "ip": "10.10.20.10",        // desk's IP — also the source filter for recording
     "timeoutMs": 1000,          // silence before the desk is considered "lost"
     "defaultScene": "1",        // scene to recall on handoff if nothing else is on
-    "defaultFade": 3            // crossfade seconds on Avo handoff / startup
+    "defaultFade": 3            // crossfade seconds on console handoff / startup
   },
 
   // ── Art-Net / DMX network ────────────────────────────────────────────────

@@ -37,7 +37,7 @@ the desk still controls the rig directly. The Pi is purely additive insurance.
 - **Rich OSC feedback** for Companion: per-scene on/off/fading state, live fade
   countdowns, console status — as both OSC feedbacks and (optionally) Companion
   custom variables.
-- **Manual Avo override** (force on/off/auto) for testing or special cases.
+- **Manual console override** (force on/off/auto) for testing or special cases.
 - **Art-Net discovery** (answers ArtPoll) so a unicasting desk will send it the
   universes it needs, and it shows up in tools like DMX Workshop.
 - **Production-ready**: atomic crash-safe writes, runs as a systemd service with
@@ -81,7 +81,7 @@ curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
 
 # 2. Get the code
-git clone https://github.com/domoconnell/assembly-rooms-artnet-scenes.git /opt/scene-setter
+git clone https://github.com/assemble-church/lx-scene-setter.git /opt/scene-setter
 cd /opt/scene-setter
 
 # 3. Install (deps + config + systemd service)
@@ -128,7 +128,7 @@ annotated template: [`config.example.jsonc`](config.example.jsonc).
 ```jsonc
 {
   // The lighting console we fail over from
-  "avo": {
+  "console": {
     "ip": "10.10.20.10",        // desk's IP — also the source filter for recording
     "timeoutMs": 1000,          // silence before the desk is considered "lost"
     "defaultScene": "1",        // scene recalled on handoff if nothing else is on
@@ -189,7 +189,7 @@ segment (legacy), or `0`.
 | `/scene/<id>/play` `[fade]` | **solo** `<id>` — turn it on and all others off (full-look button) |
 | `/scenes/off` `[fade]` | fade every scene out |
 | `/output/on` · `/output/off` | enable / disable Pi output |
-| `/scene-setter/avo-override` `<0\|1\|2>` | force console **0**=off · **1**=on · **2**=auto (default) |
+| `/scene-setter/console-override` `<0\|1\|2>` | force console **0**=off · **1**=on · **2**=auto (default) |
 | `/state` | push all feedback to the targets now |
 
 ### Feedback — sent to `companion.feedbackTargets`
@@ -200,8 +200,8 @@ Pushed on change, on startup, and on a slow heartbeat so Companion always conver
 | --- | --- |
 | `/scene-setter/scene/<id>/active` | int `0`/`1`/`2` = off / on / fading (one per recorded scene) |
 | `/scene-setter/scene/<id>/fade-remaining` | float — seconds left in *that scene's* fade |
-| `/scene-setter/avo-active` | int `0/1` — effective console-in-control state (override applied) |
-| `/scene-setter/avo-override` | string `off` / `on` / `auto` |
+| `/scene-setter/console-active` | int `0/1` — effective console-in-control state (override applied) |
+| `/scene-setter/console-override` | string `off` / `on` / `auto` |
 | `/scene-setter/status` | `PRODUCTION_CONSOLE_ACTIVE` / `BUILDING_CONTROL_ACTIVE` |
 | `/scene-setter/active-scenes` | comma-separated on-scene ids |
 | `/scene-setter/pi-output` | int `0/1` |
@@ -230,7 +230,7 @@ all you need.
 3. **Button feedback (no variables needed)** — *Listen for OSC messages (Integer)*:
    - Scene button colour: path `/scene-setter/scene/1/active`, Equal `1` → green
      (on), `2` → amber (fading), `0` → red (off).
-   - Console indicator: path `/scene-setter/avo-active`, Equal `1` → "DESK LIVE".
+   - Console indicator: path `/scene-setter/console-active`, Equal `1` → "DESK LIVE".
 
 4. **Numbers as text (needs a variable)** — a generic-OSC feedback can't render a
    received value as text, so to show a fade countdown either:
@@ -249,8 +249,8 @@ variable). Names are `prefix` + the key below:
 | --- | --- |
 | `<prefix>fade_remaining` | longest active fade, 1 d.p. |
 | `<prefix>fade_active` | `0` / `1` |
-| `<prefix>avo_active` | `0` / `1` |
-| `<prefix>avo_override` | `off` / `on` / `auto` |
+| `<prefix>console_active` | `0` / `1` |
+| `<prefix>console_override` | `off` / `on` / `auto` |
 | `<prefix>active_scenes` | comma-separated on-scene ids |
 | `<prefix>scene_<id>_fade_remaining` | that scene's own fade, 1 d.p. |
 
@@ -286,7 +286,7 @@ consoles are 0-based, some 1-based).
 - **No feedback in Companion** — check OSC is reaching `companion.listenPort`, and
   for custom variables that they exist and OSC is enabled in Companion settings.
 - **Scene recall does nothing** — the desk is considered live; check
-  `/scene-setter/avo-active`, or force `avo-override` to `0` for testing.
+  `/scene-setter/console-active`, or force `console-override` to `0` for testing.
 - **A node won't light on failover** — confirm it accepts Art-Net from the Pi's IP
   and the universe numbers match; watch `journalctl -u scene-setter -f`.
 

@@ -1,7 +1,7 @@
 {
-  "name": "assembly-rooms-artnet-scenes",
+  "name": "lx-scene-setter",
   "version": "1.0.0",
-  "description": "DMX scene recorder/setter over Art-Net with Avolites console failover, controlled via OSC.",
+  "description": "House-lighting controller with automatic Art-Net console failover, controlled over OSC (Companion).",
   "main": "src/index.js",
   "bin": {
     "scene-setter": "src/index.js"
