@@ -1,0 +1,45 @@
+{
+  // ── Avolites production console (the desk we fail over from) ──────────────
+  "avo": {
+    "ip": "10.10.20.10",        // desk's IP — also the source filter for recording
+    "timeoutMs": 1000,          // silence before the desk is considered "lost"
+    "defaultScene": "1",        // scene to recall on handoff if nothing else is on
+    "defaultFade": 3            // crossfade seconds on Avo handoff / startup
+  },
+
+  // ── Art-Net / DMX network ────────────────────────────────────────────────
+  "artnet": {
+    "port": 6454,               // we listen here (desk + ArtPoll) and send to nodes by default
+    "localIp": "",              // IP advertised in ArtPollReply; blank = auto-detect
+    "universes": 6,             // universe count (valid numbers 0..universes-1)
+    "channels": 512,            // DMX channels per universe
+    "outputs": [                // nodes we drive on failover ("port" optional)
+      { "name": "Chauvet Net-X II", "ip": "10.10.20.1", "port": 6454, "universes": [2, 3, 4, 5] },
+      { "name": "Botex Dimmer",     "ip": "10.10.20.2", "port": 6454, "universes": [1] }
+    ]
+  },
+
+  // ── Companion / OSC control surface ──────────────────────────────────────
+  "companion": {
+    "listenPort": 9000,         // we listen here for OSC commands (Companion "send" target)
+    "feedbackTargets": [        // where we push /scene-setter/* feedback
+      { "ip": "10.10.20.50", "port": 9001 }
+    ],
+    "customVariables": {        // optionally set Companion custom variables via its OSC API
+      "enabled": false,
+      "ip": "10.10.20.50",
+      "port": 12321,            // Companion's OSC listener
+      "prefix": "house_"
+    }
+  },
+
+  // ── Engine timing (rarely changed) ───────────────────────────────────────
+  "timing": {
+    "fadeFrameMs": 40,
+    "keepAliveMs": 1000,
+    "startupGraceMs": 1500,
+    "feedbackHeartbeatMs": 5000
+  },
+
+  "dataDir": "./data"
+}

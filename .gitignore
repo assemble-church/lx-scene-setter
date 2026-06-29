@@ -1,0 +1,13 @@
+node_modules/
+
+# Runtime data (scenes + state) — venue-specific, not source.
+data/
+
+# Local config — copied from config.example.jsonc by the installer.
+config.jsonc
+config.json
+
+# Artifacts from atomic writes / corrupt-file recovery.
+*.tmp
+*.corrupt
+*.log

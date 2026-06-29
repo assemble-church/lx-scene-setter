@@ -1,0 +1,20 @@
+{
+  "name": "assembly-rooms-artnet-scenes",
+  "version": "1.0.0",
+  "description": "DMX scene recorder/setter over Art-Net with Avolites console failover, controlled via OSC.",
+  "main": "src/index.js",
+  "bin": {
+    "scene-setter": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "osc": "^2.4.4"
+  },
+  "license": "MIT"
+}
