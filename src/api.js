@@ -242,7 +242,7 @@ function createApi(config, logger, engine) {
     });
   }
 
-  const wss = new WebSocketServer({ server, path: "/ws" });
+  const wss = new WebSocketServer({ noServer: true });
   wss.on("connection", (ws) => {
     const push = () => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(engine.getState()));
@@ -254,12 +254,57 @@ function createApi(config, logger, engine) {
   });
   wss.on("error", (err) => logger.error("WS server error:", err.message));
 
+  // Binary DMX feed for the universe grid — only streamed while a client (the
+  // Universes page) is connected. One frame = all universes concatenated, raw bytes.
+  const wssDmx = new WebSocketServer({ noServer: true });
+  wssDmx.on("connection", (ws) => {
+    const push = () => {
+      if (ws.readyState !== ws.OPEN) return;
+      const dmx = engine.getDmx();
+      const u = dmx.length;
+      const c = u ? dmx[0].length : 0;
+      const buf = Buffer.allocUnsafe(u * c);
+      for (let i = 0; i < u; i++) {
+        Buffer.from(dmx[i].buffer, dmx[i].byteOffset, dmx[i].length).copy(buf, i * c);
+      }
+      ws.send(buf);
+    };
+    push();
+    const interval = setInterval(push, 50); // ~20 Hz
+    ws.on("close", () => clearInterval(interval));
+    ws.on("error", () => clearInterval(interval));
+  });
+  wssDmx.on("error", (err) => logger.error("DMX WS server error:", err.message));
+
+  // Route WebSocket upgrades by path (two servers can't share one HTTP server via
+  // the `path` option — only the first would handle the upgrade).
+  server.on("upgrade", (req, socket, head) => {
+    let pathname;
+    try {
+      pathname = new URL(req.url, "http://localhost").pathname;
+    } catch (_) {
+      return socket.destroy();
+    }
+    if (pathname === "/ws") {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+    } else if (pathname === "/ws/dmx") {
+      wssDmx.handleUpgrade(req, socket, head, (ws) => wssDmx.emit("connection", ws, req));
+    } else {
+      socket.destroy();
+    }
+  });
+
   server.on("error", (err) => logger.error("HTTP server error:", err.message));
   server.listen(config.webPort, () => logger.info(`Web UI/API on :${config.webPort}`));
 
   function close() {
     try {
       wss.close();
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      wssDmx.close();
     } catch (_) {
       /* ignore */
     }

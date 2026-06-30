@@ -18,6 +18,8 @@ export interface ActivityEvent {
 }
 
 export interface EngineState {
+  universes: number;
+  channels: number;
   consoleActive: boolean;
   consoleOverride: "auto" | "on" | "off";
   controllerOutput: boolean;

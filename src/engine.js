@@ -692,6 +692,8 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     const ids = onIds();
     const onSet = new Set(ids);
     return {
+      universes: U,
+      channels: C,
       consoleActive: state.consoleActive,
       consoleOverride: state.consoleOverride,
       controllerOutput: state.piOutputEnabled,
@@ -711,12 +713,18 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     };
   }
 
+  // Live computed output buffer (array of Uint8Array) for the universe grid.
+  function getDmx() {
+    return current;
+  }
+
   return {
     start,
     handleOsc,
     onDmx,
     state,
     getState,
+    getDmx,
     createScene,
     setSceneLabel,
     deleteScene,
