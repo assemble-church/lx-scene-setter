@@ -58,6 +58,28 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     store.writeJSONAtomic(config.scenesFile, scenes);
   }
 
+  // Patch — fixtures placed at addresses. Each entry carries a resolved per-channel
+  // `fade` array (from its personality + user overrides), so the engine never needs
+  // the fixture library at runtime. Compiled into snapMap[universe][channel].
+  let patch = store.readJSON(config.patchFile, { fixtures: [] });
+  if (!patch || !Array.isArray(patch.fixtures)) patch = { fixtures: [] };
+  let snapMap = Array.from({ length: U }, () => new Uint8Array(C));
+
+  function compileSnapMap() {
+    snapMap = Array.from({ length: U }, () => new Uint8Array(C));
+    for (const fx of patch.fixtures) {
+      const u = fx.universe | 0;
+      if (u < 0 || u >= U) continue;
+      const base = (fx.address | 0) - 1; // 0-based start channel
+      const fade = Array.isArray(fx.fade) ? fx.fade : [];
+      for (let ch = 0; ch < fade.length; ch++) {
+        const abs = base + ch;
+        if (abs >= 0 && abs < C && fade[ch] === false) snapMap[u][abs] = 1;
+      }
+    }
+  }
+  compileSnapMap();
+
   // Runtime layer state per scene id:
   //   { level: 0..1, target: 0|1, fadeFrom: 0..1, fadeStart: ms, fadeDur: ms }
   const layers = {};
@@ -180,9 +202,13 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
         const src = vals[u];
         if (!src) continue;
         const dst = current[u];
+        const snapU = snapMap[u];
         const n = Math.min(C, src.length);
         for (let ch = 0; ch < n; ch++) {
-          const v = lvl >= 1 ? src[ch] : Math.round(src[ch] * lvl);
+          const raw = src[ch];
+          // Snap channels (shutters, control, etc.) jump to value while the layer
+          // is on rather than scaling with the fade level.
+          const v = snapU[ch] ? (lvl > 0 ? raw : 0) : lvl >= 1 ? raw : Math.round(raw * lvl);
           if (v > dst[ch]) dst[ch] = v;
         }
       }
@@ -718,6 +744,19 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     return current;
   }
 
+  function getPatch() {
+    return patch;
+  }
+
+  // Replace the patch, persist, recompile the snap map, and re-render.
+  function setPatch(next) {
+    patch = next && Array.isArray(next.fixtures) ? next : { fixtures: [] };
+    store.writeJSONAtomic(config.patchFile, patch);
+    compileSnapMap();
+    renderAndOutput();
+    return patch;
+  }
+
   return {
     start,
     handleOsc,
@@ -725,6 +764,8 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     state,
     getState,
     getDmx,
+    getPatch,
+    setPatch,
     createScene,
     setSceneLabel,
     deleteScene,

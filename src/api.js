@@ -9,10 +9,14 @@
 
 const http = require("http");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const crypto = require("crypto");
 const { WebSocketServer } = require("ws");
 const store = require("./store");
 const { buildFromText, buildConfig, loadGrouped, serializeConfig } = require("./config");
+const lib = require("./fixtures/library");
+const { importLibrary, sevenZipStatus } = require("./fixtures/import");
 
 // Coerce the numeric fields of a grouped config object (the form sends some as
 // strings). Mutates and returns the object.
@@ -62,11 +66,45 @@ const MIME = {
 };
 
 function createApi(config, logger, engine) {
+  // Lazily-opened fixture library (only if a fixtures.db exists).
+  let db = null;
+  let libCount = 0;
+  function library() {
+    if (db) return db;
+    if (fs.existsSync(config.fixturesDb)) {
+      try {
+        db = lib.openLibrary(config.fixturesDb);
+        libCount = lib.count(db);
+      } catch (err) {
+        logger.error("Open fixtures.db failed:", err.message);
+      }
+    }
+    return db;
+  }
+  library(); // open at startup if present
+
+  let importState = { running: false, phase: null, done: 0, total: 0, error: null };
+
+  function fixturesStatus() {
+    const z = sevenZipStatus();
+    return {
+      sevenZip: z.available,
+      sevenZipHint: z.hint,
+      libraryCount: libCount,
+      import: importState,
+    };
+  }
+
+  // The full snapshot pushed to clients = engine state + fixtures/import status.
+  function snapshot() {
+    return { ...engine.getState(), fixtures: fixturesStatus() };
+  }
+
   const server = http.createServer((req, res) => {
     const url = (req.url || "/").split("?")[0];
 
     if (url === "/api/health") return sendJson(res, { ok: true });
-    if (url === "/api/state") return sendJson(res, engine.getState());
+    if (url === "/api/state") return sendJson(res, snapshot());
 
     // POST /api/command { address, args } — routed through the same handler as OSC,
     // so the UI drives scenes exactly like a Companion button does.
@@ -191,6 +229,151 @@ function createApi(config, logger, engine) {
       return;
     }
 
+    // ---- Fixture library ----
+    if (url === "/api/fixtures/status" && req.method === "GET") {
+      return sendJson(res, fixturesStatus());
+    }
+
+    if (url === "/api/fixtures/search" && req.method === "GET") {
+      const l = library();
+      if (!l) return sendJson(res, { results: [] });
+      let q = "";
+      try {
+        q = new URL(req.url, "http://x").searchParams.get("q") || "";
+      } catch (_) {
+        /* ignore */
+      }
+      return sendJson(res, { results: lib.search(l, q, 100) });
+    }
+
+    const fxMatch = url.match(/^\/api\/fixtures\/(\d+)$/);
+    if (fxMatch && req.method === "GET") {
+      const l = library();
+      const fx = l && lib.get(l, Number(fxMatch[1]));
+      if (!fx) return badRequest(res, "fixture not found", 404);
+      return sendJson(res, fx);
+    }
+
+    // POST /api/fixtures/import — stream the uploaded .exe to disk, then import.
+    if (url === "/api/fixtures/import" && req.method === "POST") {
+      if (importState.running) return badRequest(res, "An import is already running");
+      const z = sevenZipStatus();
+      if (!z.available) return badRequest(res, z.hint || "7-Zip not available");
+      const tmpExe = path.join(os.tmpdir(), `fixlib-upload-${Date.now()}.exe`);
+      const out = fs.createWriteStream(tmpExe);
+      req.pipe(out);
+      req.on("error", () => {
+        try {
+          out.destroy();
+        } catch (_) {
+          /* ignore */
+        }
+      });
+      out.on("error", (e) => badRequest(res, e.message));
+      out.on("finish", async () => {
+        importState = { running: true, phase: "starting", done: 0, total: 0, error: null };
+        if (db) {
+          try {
+            db.close();
+          } catch (_) {
+            /* ignore */
+          }
+          db = null;
+        }
+        try {
+          const result = await importLibrary(tmpExe, config.fixturesDb, (p) => {
+            importState = { running: true, phase: p.phase, done: p.done || 0, total: p.total || 0, error: null };
+          });
+          library();
+          libCount = db ? lib.count(db) : 0;
+          importState = { running: false, phase: "done", done: result.count, total: result.total, error: null };
+          logger.info(`Fixture library imported: ${result.count} fixtures (${result.failed} skipped)`);
+          sendJson(res, { ok: true, result });
+        } catch (e) {
+          importState = { running: false, phase: "error", done: 0, total: 0, error: e.message };
+          badRequest(res, e.message);
+        } finally {
+          fs.rmSync(tmpExe, { force: true });
+        }
+      });
+      return;
+    }
+
+    // ---- Patch ----
+    if (url === "/api/patch" && req.method === "GET") {
+      return sendJson(res, engine.getPatch());
+    }
+
+    if (url === "/api/patch/add" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        const l = library();
+        if (!l) return badRequest(res, "No fixture library imported");
+        const fx = lib.get(l, Number(b.libId));
+        if (!fx) return badRequest(res, "fixture not found", 404);
+        const mode = (fx.modes || []).find((m) => m.name === b.mode) || (fx.modes || [])[0];
+        if (!mode) return badRequest(res, "fixture has no modes");
+        const fade = lib.channelFade(mode);
+        const letters = lib.channelLetters(mode);
+        const channels = mode.channels || fade.length || 1;
+        const baseLabel = typeof b.label === "string" && b.label ? b.label : fx.name;
+        const count = Math.max(1, Math.min(512, b.count | 0 || 1));
+
+        if (channels > config.channels) return badRequest(res, "Fixture is larger than one universe");
+
+        const patch = engine.getPatch();
+        let u = b.universe | 0;
+        let addr = Math.max(1, b.address | 0);
+        let added = 0;
+        for (let i = 0; i < count; i++) {
+          if (addr + channels - 1 > config.channels) {
+            u++;
+            addr = 1;
+          }
+          if (u >= config.universes) break; // out of universes
+          patch.fixtures.push({
+            id: crypto.randomUUID(),
+            libId: fx.id,
+            manufacturer: fx.manufacturer,
+            name: fx.name,
+            label: count > 1 ? `${baseLabel} ${i + 1}` : baseLabel,
+            mode: mode.name,
+            channels,
+            universe: u,
+            address: addr,
+            fade: [...fade], // own copy so per-channel overrides are independent
+            letters,
+          });
+          addr += channels;
+          added++;
+        }
+        engine.setPatch(patch);
+        sendJson(res, { ...engine.getPatch(), added });
+      });
+    }
+
+    const patchOne = url.match(/^\/api\/patch\/([^/]+)$/);
+    if (patchOne && req.method === "POST") {
+      const id = decodeURIComponent(patchOne[1]);
+      return readBody(req, res, (b) => {
+        const patch = engine.getPatch();
+        const fx = patch.fixtures.find((f) => f.id === id);
+        if (!fx) return badRequest(res, "patched fixture not found", 404);
+        if (b.universe !== undefined) fx.universe = b.universe | 0;
+        if (b.address !== undefined) fx.address = Math.max(1, b.address | 0);
+        if (typeof b.label === "string") fx.label = b.label;
+        if (Array.isArray(b.fade)) fx.fade = b.fade.map((x) => x !== false);
+        engine.setPatch(patch);
+        sendJson(res, engine.getPatch());
+      });
+    }
+    if (patchOne && req.method === "DELETE") {
+      const id = decodeURIComponent(patchOne[1]);
+      const patch = engine.getPatch();
+      patch.fixtures = patch.fixtures.filter((f) => f.id !== id);
+      engine.setPatch(patch);
+      return sendJson(res, engine.getPatch());
+    }
+
     serveStatic(url, res);
   });
 
@@ -245,7 +428,7 @@ function createApi(config, logger, engine) {
   const wss = new WebSocketServer({ noServer: true });
   wss.on("connection", (ws) => {
     const push = () => {
-      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(engine.getState()));
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(snapshot()));
     };
     push(); // immediate snapshot
     const interval = setInterval(push, 100); // ~10 Hz — smooth enough for the level bars

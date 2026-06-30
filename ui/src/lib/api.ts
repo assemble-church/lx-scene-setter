@@ -17,9 +17,17 @@ export interface ActivityEvent {
   message: string;
 }
 
+export interface FixturesStatus {
+  sevenZip: boolean;
+  sevenZipHint: string | null;
+  libraryCount: number;
+  import: { running: boolean; phase: string | null; done: number; total: number; error: string | null };
+}
+
 export interface EngineState {
   universes: number;
   channels: number;
+  fixtures?: FixturesStatus;
   consoleActive: boolean;
   consoleOverride: "auto" | "on" | "off";
   controllerOutput: boolean;
@@ -165,4 +173,111 @@ export async function saveConfigForm(config: ConfigShape): Promise<void> {
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok || body.ok === false) throw new Error(body.error || `save failed (${res.status})`);
+}
+
+// ---- Fixtures & patch ----
+
+export interface FixtureAttr {
+  id: string;
+  name: string;
+  group: string;
+  size: number;
+  fade: boolean;
+  offsets: number[];
+}
+export interface FixtureMode {
+  name: string;
+  channels: number;
+  attrs: FixtureAttr[];
+}
+export interface Fixture {
+  id: number;
+  manufacturer: string;
+  name: string;
+  short: string;
+  modes: FixtureMode[];
+}
+export interface FixtureHit {
+  id: number;
+  manufacturer: string;
+  name: string;
+  short: string;
+}
+export interface PatchFixture {
+  id: string;
+  libId: number;
+  manufacturer: string;
+  name: string;
+  label: string;
+  mode: string;
+  channels: number;
+  universe: number;
+  address: number;
+  fade: boolean[];
+  letters?: string[];
+}
+
+export async function searchFixtures(q: string): Promise<FixtureHit[]> {
+  const r = await fetch(`/api/fixtures/search?q=${encodeURIComponent(q)}`);
+  if (!r.ok) throw new Error(`search → ${r.status}`);
+  return (await r.json()).results;
+}
+
+export async function getFixture(id: number): Promise<Fixture> {
+  const r = await fetch(`/api/fixtures/${id}`);
+  if (!r.ok) throw new Error(`fixture ${id} → ${r.status}`);
+  return r.json();
+}
+
+export async function getPatch(): Promise<{ fixtures: PatchFixture[] }> {
+  const r = await fetch("/api/patch");
+  if (!r.ok) throw new Error(`patch → ${r.status}`);
+  return r.json();
+}
+
+export function patchAdd(body: {
+  libId: number;
+  mode: string;
+  universe: number;
+  address: number;
+  label?: string;
+  count?: number;
+}) {
+  return postJson<{ fixtures: PatchFixture[]; added: number }>("/api/patch/add", body);
+}
+
+export function patchUpdate(
+  id: string,
+  body: Partial<{ universe: number; address: number; label: string; fade: boolean[] }>
+) {
+  return postJson<{ fixtures: PatchFixture[] }>(`/api/patch/${encodeURIComponent(id)}`, body);
+}
+
+export async function patchDelete(id: string): Promise<void> {
+  const r = await fetch(`/api/patch/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(`delete → ${r.status}`);
+}
+
+// Upload the library .exe with upload-progress (parse progress comes via the WS
+// snapshot's fixtures.import). Resolves when the import completes.
+export function importLibraryUpload(file: File, onUpload: (pct: number) => void): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/fixtures/import");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onUpload(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      let body: { ok?: boolean; error?: string } = {};
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch (_) {
+        /* ignore */
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && body.ok !== false) resolve(body);
+      else reject(new Error(body.error || `import failed (${xhr.status})`));
+    };
+    xhr.onerror = () => reject(new Error("network error during upload"));
+    xhr.send(file);
+  });
 }

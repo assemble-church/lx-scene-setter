@@ -33,6 +33,19 @@ else
   npm install --omit=dev
 fi
 
+# 2a. Ensure 7-Zip (needed only for importing an Avolites fixture library)
+if command -v 7zz >/dev/null 2>&1 || command -v 7z >/dev/null 2>&1; then
+  echo "==> 7-Zip present (fixture-library import available)"
+elif command -v apt-get >/dev/null 2>&1; then
+  echo "==> Installing 7-Zip (for fixture-library import)"
+  sudo apt-get update -qq || true
+  if ! (sudo apt-get install -y 7zip 2>/dev/null || sudo apt-get install -y p7zip-full); then
+    echo "WARNING: couldn't install 7-Zip — fixture-library import won't work until you install p7zip-full." >&2
+  fi
+else
+  echo "WARNING: 7-Zip not found and no apt-get — install it manually for fixture-library import." >&2
+fi
+
 # 2b. Build the web UI (non-fatal — the engine still runs without it)
 echo "==> Building web UI"
 if npm --prefix "$APPDIR/ui" install && npm --prefix "$APPDIR/ui" run build; then

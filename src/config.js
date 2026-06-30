@@ -182,6 +182,8 @@ function buildConfig(fileConfig) {
     : path.join(ROOT, config.dataDir);
   config.scenesFile = path.join(config.dataDir, "scenes.json");
   config.stateFile = path.join(config.dataDir, "state.json");
+  config.patchFile = path.join(config.dataDir, "patch.json");
+  config.fixturesDb = path.join(config.dataDir, "fixtures.db");
   config.configPath = CONFIG_PATH;
 
   validate(config);
