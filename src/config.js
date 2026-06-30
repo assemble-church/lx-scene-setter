@@ -63,6 +63,11 @@ const FILE_DEFAULTS = {
     },
   },
 
+  // Web UI / API.
+  web: {
+    port: 8080, // HTTP + WebSocket port for the control-panel UI
+  },
+
   // Engine timing — rarely needs changing.
   timing: {
     fadeFrameMs: 40, // ~25 fps fade refresh
@@ -135,16 +140,9 @@ function deepMerge(base, over) {
   return out;
 }
 
-function loadConfig() {
-  let fileConfig = {};
-  if (fs.existsSync(CONFIG_PATH)) {
-    try {
-      fileConfig = JSON.parse(stripJsonComments(fs.readFileSync(CONFIG_PATH, "utf8")));
-    } catch (err) {
-      throw new Error(`Failed to parse config at ${CONFIG_PATH}: ${err.message}`);
-    }
-  }
-
+// Build the normalised, validated config from a parsed file object. Throws if
+// the result is invalid.
+function buildConfig(fileConfig) {
   const f = deepMerge(FILE_DEFAULTS, fileConfig);
 
   // Normalise the grouped file shape → the flat shape the modules consume.
@@ -174,6 +172,8 @@ function loadConfig() {
     startupGraceMs: f.timing.startupGraceMs,
     feedbackHeartbeatMs: f.timing.feedbackHeartbeatMs,
 
+    webPort: f.web.port,
+
     dataDir: f.dataDir,
   };
 
@@ -186,6 +186,100 @@ function loadConfig() {
 
   validate(config);
   return config;
+}
+
+// Parse + validate raw JSONC text (used to validate edits before saving them).
+// Throws with a helpful message on parse or validation failure.
+function buildFromText(text) {
+  let fileConfig = {};
+  if (text && text.trim()) {
+    fileConfig = JSON.parse(stripJsonComments(text));
+  }
+  return buildConfig(fileConfig);
+}
+
+function loadConfig() {
+  const text = fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, "utf8") : "";
+  try {
+    return buildFromText(text);
+  } catch (err) {
+    throw new Error(`Failed to load config at ${CONFIG_PATH}: ${err.message}`);
+  }
+}
+
+// The grouped file object (defaults merged in) — what the form UI edits.
+function loadGrouped() {
+  const text = fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, "utf8") : "";
+  const fileConfig = text && text.trim() ? JSON.parse(stripJsonComments(text)) : {};
+  return deepMerge(FILE_DEFAULTS, fileConfig);
+}
+
+// Render a grouped config object back to annotated JSONC (so form saves keep the
+// file readable). Values are taken as-is — validate (buildConfig) before calling.
+function serializeConfig(g) {
+  const j = (v) => JSON.stringify(v);
+  const outputs = (g.artnet.outputs || [])
+    .map(
+      (o) =>
+        `    { "name": ${j(o.name || "")}, "ip": ${j(o.ip || "")}, "port": ${
+          o.port ?? g.artnet.port
+        }, "universes": ${j(o.universes || [])} }`
+    )
+    .join(",\n");
+  const targets = (g.companion.feedbackTargets || [])
+    .map((t) => `    { "ip": ${j(t.ip || "")}, "port": ${t.port} }`)
+    .join(",\n");
+
+  return `{
+  // ── Lighting console (the desk we fail over from) ─────────────────────────
+  "console": {
+    "ip": ${j(g.console.ip)},                 // desk's IP — also the source filter for recording
+    "timeoutMs": ${g.console.timeoutMs},      // silence before the desk is considered "lost"
+    "defaultScene": ${j(g.console.defaultScene)},  // recalled on handoff if nothing else is on
+    "defaultFade": ${g.console.defaultFade}   // crossfade seconds on handoff / startup
+  },
+
+  // ── Art-Net / DMX network ─────────────────────────────────────────────────
+  "artnet": {
+    "port": ${g.artnet.port},
+    "localIp": ${j(g.artnet.localIp)},        // advertised in ArtPollReply; blank = auto-detect
+    "universes": ${g.artnet.universes},
+    "channels": ${g.artnet.channels},
+    "outputs": [
+${outputs}
+    ]
+  },
+
+  // ── Companion / OSC control surface ───────────────────────────────────────
+  "companion": {
+    "listenPort": ${g.companion.listenPort},
+    "feedbackTargets": [
+${targets}
+    ],
+    "customVariables": {
+      "enabled": ${g.companion.customVariables.enabled},
+      "ip": ${j(g.companion.customVariables.ip)},
+      "port": ${g.companion.customVariables.port},
+      "prefix": ${j(g.companion.customVariables.prefix)}
+    }
+  },
+
+  // ── Web UI / API ──────────────────────────────────────────────────────────
+  "web": {
+    "port": ${g.web.port}
+  },
+
+  // ── Engine timing (rarely changed) ────────────────────────────────────────
+  "timing": {
+    "fadeFrameMs": ${g.timing.fadeFrameMs},
+    "keepAliveMs": ${g.timing.keepAliveMs},
+    "startupGraceMs": ${g.timing.startupGraceMs},
+    "feedbackHeartbeatMs": ${g.timing.feedbackHeartbeatMs}
+  },
+
+  "dataDir": ${j(g.dataDir)}
+}
+`;
 }
 
 function validate(config) {
@@ -217,4 +311,11 @@ function validate(config) {
   }
 }
 
-module.exports = { loadConfig, FILE_DEFAULTS };
+module.exports = {
+  loadConfig,
+  buildFromText,
+  buildConfig,
+  loadGrouped,
+  serializeConfig,
+  FILE_DEFAULTS,
+};

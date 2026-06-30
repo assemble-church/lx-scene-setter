@@ -27,12 +27,12 @@ function readJSON(file, fallback) {
   }
 }
 
-function writeJSONAtomic(file, data) {
+function writeTextAtomic(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
   const fd = fs.openSync(tmp, "w");
   try {
-    fs.writeFileSync(fd, JSON.stringify(data, null, 2));
+    fs.writeFileSync(fd, text);
     fs.fsyncSync(fd); // flush to disk before the rename
   } finally {
     fs.closeSync(fd);
@@ -40,4 +40,8 @@ function writeJSONAtomic(file, data) {
   fs.renameSync(tmp, file);
 }
 
-module.exports = { readJSON, writeJSONAtomic };
+function writeJSONAtomic(file, data) {
+  writeTextAtomic(file, JSON.stringify(data, null, 2));
+}
+
+module.exports = { readJSON, writeJSONAtomic, writeTextAtomic };

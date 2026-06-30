@@ -112,11 +112,25 @@ git pull
 ./scripts/install.sh                    # idempotent; re-runs deps + service
 ```
 
+Once running, the **web control panel** is at `http://<pi-ip>:8080`.
+
 ### Running manually (development)
 
 ```bash
-npm install
-npm start          # or: npm run dev   (auto-restarts on file changes)
+npm install            # engine deps
+npm install --prefix ui   # UI deps (first time only)
+
+npm run dev            # runs BOTH: the engine (DMX/OSC/WS, auto-restart) and the
+                       # Vite UI dev server with hot-reload, in one terminal
+```
+Then open the **Vite URL it prints** (`http://localhost:5173`) for the hot-reloading
+UI — it proxies `/api` and `/ws` to the engine on `:8080`. The engine's own port
+(`:8080`) serves the *built* UI in production.
+
+Production build + run (what the Pi does):
+```bash
+npm run build          # builds ui/ → ui/dist (served by the engine)
+npm start              # engine only; UI served at :8080
 ```
 
 ## Configuration (`config.jsonc`)

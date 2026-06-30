@@ -8,6 +8,7 @@ const { loadConfig } = require("./config");
 const { createArtnetOutput, createArtnetInput } = require("./artnet");
 const { createOsc } = require("./osc");
 const { createEngine } = require("./engine");
+const { createApi } = require("./api");
 
 let config;
 try {
@@ -34,14 +35,17 @@ engine = createEngine({
 
 const artnetIn = createArtnetInput(config, logger, (u, p, l) => engine.onDmx(u, p, l));
 
+const api = createApi(config, logger, engine);
+
 const stop = engine.start();
 
 logger.info("Scene Setter running");
 logger.info(`Config:       ${config.configPath}`);
 logger.info(`OSC in:       ${config.oscPort}`);
 logger.info(`Art-Net in/out: ${config.artnetPort}`);
+logger.info(`Web UI:       ${config.webPort}`);
 logger.info(`Universes:    ${config.universes}`);
-logger.info(`console IP:       ${config.consoleIp} (timeout ${config.consoleTimeoutMs}ms)`);
+logger.info(`Console IP:   ${config.consoleIp} (timeout ${config.consoleTimeoutMs}ms)`);
 
 // ---------------- SHUTDOWN ----------------
 // We intentionally do NOT blackout on exit — leave the rig at its last look so a
@@ -69,6 +73,11 @@ function shutdown(signal) {
   }
   try {
     output.close();
+  } catch (_) {
+    /* ignore */
+  }
+  try {
+    api.close();
   } catch (_) {
     /* ignore */
   }

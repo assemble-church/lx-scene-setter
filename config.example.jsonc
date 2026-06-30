@@ -33,6 +33,11 @@
     }
   },
 
+  // ── Web UI / API ─────────────────────────────────────────────────────────
+  "web": {
+    "port": 8080              // control-panel UI (HTTP + WebSocket)
+  },
+
   // ── Engine timing (rarely changed) ───────────────────────────────────────
   "timing": {
     "fadeFrameMs": 40,

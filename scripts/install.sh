@@ -33,6 +33,14 @@ else
   npm install --omit=dev
 fi
 
+# 2b. Build the web UI (non-fatal — the engine still runs without it)
+echo "==> Building web UI"
+if npm --prefix "$APPDIR/ui" install && npm --prefix "$APPDIR/ui" run build; then
+  echo "==> Web UI built"
+else
+  echo "WARNING: UI build failed — the engine will run but the web panel won't be served." >&2
+fi
+
 # 3. Config (don't overwrite an existing one)
 if [ ! -f "$APPDIR/config.jsonc" ] && [ ! -f "$APPDIR/config.json" ]; then
   cp "$APPDIR/config.example.jsonc" "$APPDIR/config.jsonc"

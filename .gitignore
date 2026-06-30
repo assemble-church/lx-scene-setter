@@ -1,5 +1,8 @@
 node_modules/
 
+# Built UI bundle (produced by `npm run build`).
+ui/dist/
+
 # Runtime data (scenes + state) — venue-specific, not source.
 data/
 

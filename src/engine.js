@@ -38,8 +38,25 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   // Computed output buffer (HTP merge of active layers). In memory only.
   const current = Array.from({ length: U }, () => new Uint8Array(C));
 
-  // Recorded looks: scenes[id] = array(U) of arrays(C), values 0..255.
-  const scenes = store.readJSON(config.scenesFile, {});
+  // Recorded looks: scenes[id] = { label, data } where data is array(U) of
+  // arrays(C), values 0..255. Older files stored just the array — migrate those.
+  const rawScenes = store.readJSON(config.scenesFile, {});
+  const scenes = {};
+  for (const id of Object.keys(rawScenes)) {
+    const v = rawScenes[id];
+    if (Array.isArray(v)) {
+      scenes[id] = { label: "", data: v };
+    } else {
+      scenes[id] = {
+        label: typeof v.label === "string" ? v.label : "",
+        data: Array.isArray(v.data) ? v.data : [],
+      };
+    }
+  }
+
+  function saveScenes() {
+    store.writeJSONAtomic(config.scenesFile, scenes);
+  }
 
   // Runtime layer state per scene id:
   //   { level: 0..1, target: 0|1, fadeFrom: 0..1, fadeStart: ms, fadeDur: ms }
@@ -61,6 +78,15 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   let renderTimer = null;
   let lastFadeEmit = 0;
   const round1 = (x) => Math.round(x * 10) / 10;
+
+  // Activity log — a ring buffer of user-relevant events, surfaced to the web UI
+  // (and still written to the normal log so journald keeps a record).
+  const activityLog = [];
+  function event(type, message) {
+    logger.info(message);
+    activityLog.push({ t: now(), type, message });
+    if (activityLog.length > 100) activityLog.shift();
+  }
 
   // ---------------- LAYER STATE ----------------
 
@@ -147,7 +173,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     for (const id of Object.keys(layers)) {
       const L = layers[id];
       if (L.level <= 0) continue;
-      const vals = L.values || scenes[id]; // desk layer carries its own snapshot
+      const vals = L.values || (scenes[id] && scenes[id].data); // desk layer carries its own snapshot
       if (!vals) continue;
       const lvl = L.level;
       for (let u = 0; u < U; u++) {
@@ -334,7 +360,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   function setConsoleOverride(mode) {
     if (!["on", "off", "auto"].includes(mode)) mode = "auto";
     state.consoleOverride = mode;
-    logger.info(`console override set to ${mode}`);
+    event("override", `Console override → ${mode}`);
     recomputeConsole(); // apply any change to the effective state
     broadcastTop(); // always publish the override + effective state
   }
@@ -344,9 +370,9 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     state.consoleActive = active;
 
     if (active) {
-      stopRender(); // desk takes over; stop Pi rendering (levels/targets are kept)
+      stopRender(); // desk takes over; stop controller rendering (levels/targets are kept)
       state.piOutputEnabled = false;
-      logger.info("console active → Pi output disabled (desk in control)");
+      event("console", "Console live — desk in control, controller output off");
       broadcastState();
     } else {
       state.piOutputEnabled = true;
@@ -356,10 +382,10 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
       captureDeskLayer(config.defaultFadeOnConsoleLost);
       const restore = onIds();
       if (restore.length === 0 && scenes[config.defaultSceneOnConsoleLost]) {
-        logger.info(`console lost → crossfading to default scene ${config.defaultSceneOnConsoleLost}`);
+        event("console", `Console lost — crossfading to default scene ${config.defaultSceneOnConsoleLost}`);
         setLayer(config.defaultSceneOnConsoleLost, true, config.defaultFadeOnConsoleLost, 0);
       } else {
-        logger.info(`console lost → crossfading to scenes [${restore.join(",")}]`);
+        event("console", `Console lost — crossfading to scene(s) ${restore.join(", ")}`);
         for (const id of restore) setLayer(id, true, config.defaultFadeOnConsoleLost, 0);
       }
       persist();
@@ -387,8 +413,8 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   // ---------------- SCENE COMMANDS ----------------
 
   function consoleBlocked(action) {
-    logger.warn(`${action} ignored — console console is live`);
-    sendOsc("/scene-setter/error", [{ type: "s", value: "console active — scene control disabled" }]);
+    logger.warn(`${action} ignored — console is live`);
+    sendOsc("/scene-setter/error", [{ type: "s", value: "Console active — scene control disabled" }]);
   }
 
   function sceneMissing(id) {
@@ -401,11 +427,80 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
       logger.warn("Record ignored: no scene id");
       return;
     }
-    scenes[id] = current.map((u) => Array.from(u));
-    store.writeJSONAtomic(config.scenesFile, scenes);
-    logger.info(`Recorded scene ${id}`);
+    const label = scenes[id] ? scenes[id].label : "";
+    scenes[id] = { label, data: current.map((u) => Array.from(u)) };
+    saveScenes();
+    event("record", `Recorded scene ${id}`);
     sendOsc("/scene-setter/recorded", [{ type: "s", value: String(id) }]);
     broadcastScenes(); // publish the new scene's feedback path
+  }
+
+  // Next free integer id (as a string).
+  function nextSceneId() {
+    let n = 1;
+    while (scenes[String(n)]) n++;
+    return String(n);
+  }
+
+  // Create an empty scene (no data until recorded) with a label. Returns its id.
+  function createScene(label) {
+    const id = nextSceneId();
+    scenes[id] = { label: typeof label === "string" ? label : "", data: [] };
+    saveScenes();
+    event("scene", `Created scene ${id}${scenes[id].label ? ` "${scenes[id].label}"` : ""}`);
+    broadcastScenes();
+    return id;
+  }
+
+  function setSceneLabel(id, label) {
+    if (!scenes[id]) return false;
+    scenes[id].label = typeof label === "string" ? label : "";
+    saveScenes();
+    broadcastScenes();
+    return true;
+  }
+
+  function deleteScene(id) {
+    if (!scenes[id]) return false;
+    delete scenes[id];
+    if (layers[id]) delete layers[id]; // drop any live contribution
+    saveScenes();
+    persist();
+    event("scene", `Deleted scene ${id}`);
+    commit(); // re-render without it + publish
+    return true;
+  }
+
+  // The raw stored object for the editor: { label, data }.
+  function getSceneRaw(id) {
+    return scenes[id] ? { label: scenes[id].label, data: scenes[id].data } : null;
+  }
+
+  // Replace a scene from a raw object (validated). Throws on invalid input.
+  function setSceneRaw(id, obj) {
+    if (!scenes[id]) throw new Error(`Scene ${id} not found`);
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+      throw new Error("Expected an object { label, data }");
+    }
+    const label = typeof obj.label === "string" ? obj.label : "";
+    if (!Array.isArray(obj.data)) throw new Error("`data` must be an array of universes");
+    if (obj.data.length > U) throw new Error(`Too many universes (max ${U})`);
+    const data = obj.data.map((row, u) => {
+      if (!Array.isArray(row)) throw new Error(`data[${u}] must be an array of channel values`);
+      if (row.length > C) throw new Error(`data[${u}] has too many channels (max ${C})`);
+      return row.map((v, ch) => {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || n > 255) {
+          throw new Error(`data[${u}][${ch}] must be an integer 0–255`);
+        }
+        return n;
+      });
+    });
+    scenes[id] = { label, data };
+    saveScenes();
+    if (layers[id]) commit(); // re-render if live
+    else broadcastScenes();
+    return true;
   }
 
   function setSceneState(id, on, fade) {
@@ -413,7 +508,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     if (!scenes[id]) return void sceneMissing(id);
     if (on) state.piOutputEnabled = true;
     setLayer(id, on, fade);
-    logger.info(`Scene ${id} ${on ? "on" : "off"} over ${Number(fade) || 0}s`);
+    event("scene", `Scene ${id} ${on ? "on" : "off"}${Number(fade) ? ` (${Number(fade)}s)` : ""}`);
     persist();
     commit();
   }
@@ -441,14 +536,14 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
       if (other !== String(id)) setLayer(other, false, fade);
     }
     setLayer(id, true, fade);
-    logger.info(`Solo scene ${id} over ${Number(fade) || 0}s`);
+    event("scene", `Solo scene ${id}${Number(fade) ? ` (${Number(fade)}s)` : ""}`);
     persist();
     commit();
   }
 
   function scenesOff(fade) {
     for (const id of Object.keys(layers)) setLayer(id, false, fade);
-    logger.info(`All scenes off over ${Number(fade) || 0}s`);
+    event("scenes", `All scenes off${Number(fade) ? ` (${Number(fade)}s)` : ""}`);
     persist();
     commit();
   }
@@ -583,7 +678,51 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     };
   }
 
-  return { start, handleOsc, onDmx, state };
+  // Snapshot for the web API / WS feed.
+  // Live display level (0..1) for a scene — what the controller is actually
+  // outputting for it (0 while the desk is in control or output is disabled).
+  function sceneLevel(id) {
+    if (state.consoleActive || !state.piOutputEnabled) return 0;
+    const L = layers[id];
+    return L ? L.level : 0;
+  }
+
+  function getState() {
+    const f = fadeStatus();
+    const ids = onIds();
+    const onSet = new Set(ids);
+    return {
+      consoleActive: state.consoleActive,
+      consoleOverride: state.consoleOverride,
+      controllerOutput: state.piOutputEnabled,
+      activeScenes: ids,
+      scenes: Object.keys(scenes)
+        .sort(cmpIds)
+        .map((id) => ({
+          id,
+          label: scenes[id].label,
+          on: onSet.has(id), // intent (target on) — drives the Activate/Deactivate label
+          state: sceneState(id), // 0 off / 1 on / 2 fading
+          level: Math.round(sceneLevel(id) * 100) / 100,
+          fadeRemaining: round1(sceneFadeRemaining(id)),
+        })),
+      fade: { active: f.active, remaining: round1(f.remaining), total: round1(f.total) },
+      log: activityLog.slice(-60),
+    };
+  }
+
+  return {
+    start,
+    handleOsc,
+    onDmx,
+    state,
+    getState,
+    createScene,
+    setSceneLabel,
+    deleteScene,
+    getSceneRaw,
+    setSceneRaw,
+  };
 }
 
 module.exports = { createEngine };
