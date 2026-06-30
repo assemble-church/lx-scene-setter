@@ -13,7 +13,7 @@ const nav = [
   { to: "/config", label: "Config", icon: Settings, end: false },
 ];
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({ children, bare }: { children: ReactNode; bare?: boolean }) {
   const { state, status } = useEngine();
 
   return (
@@ -48,22 +48,24 @@ export function AppShell({ children }: { children: ReactNode }) {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-6">
-          <div className="text-sm text-muted-foreground">House lighting controller</div>
-          <div className="flex items-center gap-2">
-            {state && (
-              <>
-                <Badge variant={state.consoleActive ? "destructive" : "success"}>
-                  {state.consoleActive ? "DESK LIVE" : "HOUSE CONTROL"}
-                </Badge>
-                <Badge variant={state.controllerOutput ? "secondary" : "outline"}>
-                  controller {state.controllerOutput ? "on" : "off"}
-                </Badge>
-              </>
-            )}
-          </div>
-        </header>
-        <main className="flex-1 overflow-auto p-6">{children}</main>
+        {!bare && (
+          <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-6">
+            <div className="text-sm text-muted-foreground">House lighting controller</div>
+            <div className="flex items-center gap-2">
+              {state && (
+                <>
+                  <Badge variant={state.consoleActive ? "destructive" : "success"}>
+                    {state.consoleActive ? "DESK LIVE" : "HOUSE CONTROL"}
+                  </Badge>
+                  <Badge variant={state.controllerOutput ? "secondary" : "outline"}>
+                    controller {state.controllerOutput ? "on" : "off"}
+                  </Badge>
+                </>
+              )}
+            </div>
+          </header>
+        )}
+        <main className={cn("min-w-0 flex-1", bare ? "overflow-hidden" : "overflow-auto p-6")}>{children}</main>
       </div>
     </div>
   );

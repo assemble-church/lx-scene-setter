@@ -12,7 +12,8 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Plus, Code2, Trash2 } from "lucide-react";
+import { Plus, Code2, Trash2, SlidersHorizontal } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { useEngine } from "@/lib/useEngine";
 import {
   command,
@@ -79,6 +80,7 @@ function LabelInput({ id, label }: { id: string; label: string }) {
 export function Scenes() {
   const { state } = useEngine();
   const scenes = state?.scenes ?? [];
+  const navigate = useNavigate();
 
   const [createOpen, setCreateOpen] = useState(false);
   const [newLabel, setNewLabel] = useState("");
@@ -198,6 +200,9 @@ export function Scenes() {
                           onClick={() => command(`/scene/${s.id}/${s.on ? "off" : "on"}`, [FADE])}
                         >
                           {s.on ? "Deactivate" : "Activate"}
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => navigate(`/scene/${s.id}`)}>
+                          <SlidersHorizontal className="h-4 w-4" /> Edit
                         </Button>
                         <Button size="sm" variant="outline" onClick={() => setRecordId(s.id)}>
                           Record

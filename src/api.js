@@ -374,6 +374,29 @@ function createApi(config, logger, engine) {
       return sendJson(res, engine.getPatch());
     }
 
+    // ---- Scene editor (live programmer) ----
+    if (url === "/api/scene-edit/begin" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        const ok = engine.editBegin(String(b.sceneId));
+        if (!ok) return badRequest(res, "scene not found", 404);
+        sendJson(res, { ok: true });
+      });
+    }
+    if (url === "/api/scene-edit/set" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        engine.editSet(Array.isArray(b.updates) ? b.updates : []);
+        sendJson(res, { ok: true });
+      });
+    }
+    if (url === "/api/scene-edit/save" && req.method === "POST") {
+      const ok = engine.editSave();
+      return ok ? sendJson(res, { ok: true }) : badRequest(res, "not editing");
+    }
+    if (url === "/api/scene-edit/end" && req.method === "POST") {
+      engine.editEnd();
+      return sendJson(res, { ok: true });
+    }
+
     serveStatic(url, res);
   });
 
@@ -420,7 +443,12 @@ function createApi(config, logger, engine) {
         res.writeHead(404);
         return res.end();
       }
-      res.writeHead(200, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream" });
+      const headers = { "Content-Type": MIME[path.extname(file)] || "application/octet-stream" };
+      // Hashed assets are immutable; index.html must always be revalidated so a
+      // new build's bundle is picked up immediately (no stale cached HTML).
+      if (file.endsWith("index.html")) headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+      else if (file.includes(`${path.sep}assets${path.sep}`)) headers["Cache-Control"] = "public, max-age=31536000, immutable";
+      res.writeHead(200, headers);
       res.end(data);
     });
   }

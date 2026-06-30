@@ -80,6 +80,14 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   }
   compileSnapMap();
 
+  // Scene editor / live programmer.
+  const editor = {
+    active: false,
+    sceneId: null,
+    buf: Array.from({ length: U }, () => new Uint8Array(C)),
+    restore: null, // scene ids that were live before editing, restored on exit
+  };
+
   // Runtime layer state per scene id:
   //   { level: 0..1, target: 0|1, fadeFrom: 0..1, fadeStart: ms, fadeDur: ms }
   const layers = {};
@@ -228,6 +236,13 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
 
   // Render the current instant and push it out.
   function renderAndOutput() {
+    if (editor.active) {
+      // Programmer mode: output the editor buffer verbatim (WYSIWYG of the scene
+      // being built), bypassing the layer/HTP render.
+      for (let u = 0; u < U; u++) current[u].set(editor.buf[u]);
+      outputAll();
+      return;
+    }
     advanceLayers(now());
     renderToCurrent();
     outputAll();
@@ -302,6 +317,10 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     sendOsc("/scene-setter/active-scenes", [{ type: "s", value: onIds().join(",") }]);
     pushVar("console_active", state.consoleActive ? 1 : 0, "i");
     pushVar("active_scenes", onIds().join(","), "s");
+    // Editor lock: which scene is being live-edited ("" = none). While set, OSC
+    // control commands are ignored so the edited scene can't be toggled remotely.
+    sendOsc("/scene-setter/editing", [{ type: "s", value: editor.active ? String(editor.sceneId) : "" }]);
+    pushVar("editing", editor.active ? String(editor.sceneId) : "", "s");
   }
 
   // Tri-state per scene: 0 = off, 1 = on (settled), 2 = fading (in or out).
@@ -597,6 +616,16 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     const parts = msg.address.split("/").filter(Boolean);
     const cmd = parts[0];
 
+    // While the scene editor is live, lock out all control commands so the edited
+    // scene can't be toggled/overridden remotely. State requests still answered.
+    if (editor.active) {
+      if (cmd === "state") return void broadcastState();
+      sendOsc("/scene-setter/error", [
+        { type: "s", value: `editing scene ${editor.sceneId} — controls locked` },
+      ]);
+      return;
+    }
+
     if (cmd === "scene") {
       const id = parts[1];
       const verb = parts[2];
@@ -720,6 +749,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     return {
       universes: U,
       channels: C,
+      editing: editor.active ? editor.sceneId : null,
       consoleActive: state.consoleActive,
       consoleOverride: state.consoleOverride,
       controllerOutput: state.piOutputEnabled,
@@ -748,6 +778,77 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     return patch;
   }
 
+  // ---- Scene editor (live programmer) ----
+  function editBegin(sceneId) {
+    if (!scenes[sceneId]) return false;
+    // Stash whatever was live so we can restore it on exit. Only on first entry —
+    // a "revert" re-calls editBegin while already editing and must not clobber it.
+    if (!editor.active) editor.restore = onIds();
+    stopRender();
+    const data = scenes[sceneId].data || [];
+    for (let u = 0; u < U; u++) {
+      editor.buf[u].fill(0);
+      const row = data[u];
+      if (row) for (let ch = 0; ch < Math.min(C, row.length); ch++) editor.buf[u][ch] = row[ch] | 0;
+    }
+    editor.active = true;
+    editor.sceneId = String(sceneId);
+    state.piOutputEnabled = true;
+    // Entering the editor takes over live output: stop every other scene and make
+    // the edited scene the only live one, so OSC/Companion feedback matches what
+    // the editor is outputting.
+    for (const other of Object.keys(layers)) {
+      if (other !== DESK_LAYER) setLayer(other, false, 0);
+    }
+    setLayer(editor.sceneId, true, 0);
+    persist();
+    event("scene", `Editing scene ${sceneId} — live, other scenes off, OSC locked`);
+    renderAndOutput();
+    broadcastState();
+    return true;
+  }
+
+  function editSet(updates) {
+    if (!editor.active) return false;
+    for (const x of updates || []) {
+      const u = x.universe | 0;
+      const ch = (x.channel | 0) - 1;
+      const v = Math.max(0, Math.min(255, x.value | 0));
+      if (u >= 0 && u < U && ch >= 0 && ch < C) editor.buf[u][ch] = v;
+    }
+    renderAndOutput();
+    return true;
+  }
+
+  function editSave() {
+    if (!editor.active || !scenes[editor.sceneId]) return false;
+    scenes[editor.sceneId] = {
+      label: scenes[editor.sceneId].label,
+      data: editor.buf.map((u) => Array.from(u)),
+    };
+    saveScenes();
+    event("record", `Edited scene ${editor.sceneId}`);
+    broadcastScenes();
+    return true;
+  }
+
+  function editEnd() {
+    // No auto-save: unsaved edits are discarded (the scene's saved data is
+    // unchanged, so the live layer falls back to it on exit).
+    const restore = editor.restore || [];
+    editor.active = false;
+    editor.sceneId = null;
+    editor.restore = null;
+    // Restore whatever scenes were live before editing: stop the edited scene
+    // (and anything else), bring the stashed scenes back on.
+    for (const id of Object.keys(layers)) if (id !== DESK_LAYER) setLayer(id, false, 0);
+    for (const id of restore) if (scenes[id]) setLayer(id, true, 0);
+    persist();
+    renderAndOutput();
+    broadcastState();
+    return true;
+  }
+
   // Replace the patch, persist, recompile the snap map, and re-render.
   function setPatch(next) {
     patch = next && Array.isArray(next.fixtures) ? next : { fixtures: [] };
@@ -766,6 +867,10 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     getDmx,
     getPatch,
     setPatch,
+    editBegin,
+    editSet,
+    editSave,
+    editEnd,
     createScene,
     setSceneLabel,
     deleteScene,

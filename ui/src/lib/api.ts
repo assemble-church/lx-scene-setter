@@ -27,6 +27,7 @@ export interface FixturesStatus {
 export interface EngineState {
   universes: number;
   channels: number;
+  editing?: string | null;
   fixtures?: FixturesStatus;
   consoleActive: boolean;
   consoleOverride: "auto" | "on" | "off";
@@ -184,6 +185,7 @@ export interface FixtureAttr {
   size: number;
   fade: boolean;
   offsets: number[];
+  functions?: { name: string; min: number; max: number }[];
 }
 export interface FixtureMode {
   name: string;
@@ -280,4 +282,24 @@ export function importLibraryUpload(file: File, onUpload: (pct: number) => void)
     xhr.onerror = () => reject(new Error("network error during upload"));
     xhr.send(file);
   });
+}
+
+// ---- Scene editor (live programmer) ----
+
+export function sceneEditBegin(sceneId: string) {
+  return postJson<{ ok: boolean }>("/api/scene-edit/begin", { sceneId });
+}
+export function sceneEditSet(updates: { universe: number; channel: number; value: number }[]) {
+  // Fire-and-forget for live dragging.
+  return fetch("/api/scene-edit/set", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ updates }),
+  }).catch(() => {});
+}
+export function sceneEditSave() {
+  return postJson<{ ok: boolean }>("/api/scene-edit/save", {});
+}
+export function sceneEditEnd() {
+  return fetch("/api/scene-edit/end", { method: "POST" }).catch(() => {});
 }

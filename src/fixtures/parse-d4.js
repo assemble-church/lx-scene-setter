@@ -23,6 +23,13 @@ function deriveFade(group, functionCount) {
   return group === "I" || group === "C" || group === "P";
 }
 
+// A discrete function/slot, e.g. { name: "Gobo 3", min: 40, max: 49 }.
+function parseFn(fn) {
+  const [a, b] = String(fn["@_Dmx"] || "").split("~").map((s) => parseInt(s, 10));
+  if (!Number.isFinite(a)) return null;
+  return { name: fn["@_Name"] || "", min: a, max: Number.isFinite(b) ? b : a };
+}
+
 function parseOffsets(raw, base) {
   return String(raw)
     .split(",")
@@ -51,6 +58,7 @@ function collectAttrs(node, base, ctx, out, prefix, depth) {
         size: def ? def.size : 1,
         fade: def ? def.fade : true,
         offsets,
+        ...(def && def.functions ? { functions: def.functions } : {}),
       });
     }
   }
@@ -92,6 +100,8 @@ function parseD4(xml) {
       group,
       size: Number(a["@_Size"]) || 1,
       fade: deriveFade(group, fns.length),
+      // Keep discrete slots (gobo/colour-wheel/shutter modes); skip continuous.
+      functions: fns.length > 1 ? fns.map(parseFn).filter(Boolean) : undefined,
     };
   }
 

@@ -40,6 +40,19 @@
     height: 100%;
   }
 
+  /* Control surface, not a document: nothing highlights under the cursor during
+     all the dragging — except real text fields where selection is expected. */
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  input,
+  textarea,
+  [contenteditable="true"] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
   /* Styled scrollbars site-wide — every native scrollbar matches this. */
   * {
     scrollbar-width: thin; /* Firefox */
