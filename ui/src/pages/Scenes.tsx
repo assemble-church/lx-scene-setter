@@ -22,6 +22,7 @@ import {
   getSceneRaw,
   setSceneRaw,
   deleteScene,
+  programmerLoadScene,
   type SceneStatus,
 } from "@/lib/api";
 
@@ -201,7 +202,14 @@ export function Scenes() {
                         >
                           {s.on ? "Deactivate" : "Activate"}
                         </Button>
-                        <Button size="sm" variant="outline" onClick={() => navigate(`/scene/${s.id}`)}>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={async () => {
+                            await programmerLoadScene(s.id).catch(() => {});
+                            navigate("/fixtures");
+                          }}
+                        >
                           <SlidersHorizontal className="h-4 w-4" /> Edit
                         </Button>
                         <Button size="sm" variant="outline" onClick={() => setRecordId(s.id)}>

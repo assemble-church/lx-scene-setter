@@ -3,10 +3,10 @@ import { EngineProvider } from "@/lib/useEngine";
 import { AppShell } from "@/components/layout/AppShell";
 import { Dashboard } from "@/pages/Dashboard";
 import { Scenes } from "@/pages/Scenes";
+import { Fixtures } from "@/pages/Fixtures";
 import { Universes } from "@/pages/Universes";
 import { Patch } from "@/pages/Patch";
 import { ConfigPage } from "@/pages/ConfigPage";
-import { SceneEditor } from "@/pages/SceneEditor";
 
 function Shell() {
   return (
@@ -14,6 +14,7 @@ function Shell() {
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/scenes" element={<Scenes />} />
+        <Route path="/fixtures" element={<Fixtures />} />
         <Route path="/universes" element={<Universes />} />
         <Route path="/patch" element={<Patch />} />
         <Route path="/config" element={<ConfigPage />} />
@@ -27,15 +28,7 @@ export default function App() {
     <EngineProvider>
       <BrowserRouter>
         <Routes>
-          {/* Scene editor — keeps the main nav, fills the rest (no app header/padding) */}
-          <Route
-            path="/scene/:id"
-            element={
-              <AppShell bare>
-                <SceneEditor />
-              </AppShell>
-            }
-          />
+          {/* Scenes are edited via the Fixtures programmer (see Scenes → Edit). */}
           <Route path="*" element={<Shell />} />
         </Routes>
       </BrowserRouter>

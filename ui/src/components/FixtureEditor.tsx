@@ -1,32 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import {
-  Select,
-  SelectTrigger,
-  SelectValue,
-  SelectContent,
-  SelectItem,
-} from "@/components/ui/select";
-import { ArrowLeft, Save, Undo2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { useEngine } from "@/lib/useEngine";
-import {
-  sceneEditBegin,
-  sceneEditSet,
-  sceneEditSave,
-  sceneEditEnd,
-  getSceneRaw,
-  getPatch,
-  getFixture,
-  type PatchFixture,
-  type Fixture,
-  type FixtureMode,
-  type FixtureAttr,
-} from "@/lib/api";
+import { getFixture, type PatchFixture, type FixtureMode, type FixtureAttr } from "@/lib/api";
 
-type Update = { universe: number; channel: number; value: number };
+export type Update = { universe: number; channel: number; value: number };
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
 const h2 = (n: number) => n.toString(16).padStart(2, "0");
 
@@ -37,7 +13,7 @@ const COLOUR_HEX: Record<string, string> = {
   "ultra violet": "#6a2cff", uv: "#6a2cff", magenta: "#ff2bd6", pink: "#ff7ab8", rose: "#ff5e8a",
   cto: "#ffd9a0", ctb: "#cfe6ff", congo: "#1c2bff",
 };
-function nameToHex(name: string): string | null {
+export function nameToHex(name: string): string | null {
   const n = (name || "").toLowerCase().trim();
   if (COLOUR_HEX[n]) return COLOUR_HEX[n];
   for (const k of Object.keys(COLOUR_HEX)) if (n.includes(k)) return COLOUR_HEX[k];
@@ -83,7 +59,7 @@ function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
 }
 
 // ── primitives ──────────────────────────────────────────────────────────────
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
+export function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-border/60 bg-card/50 p-3">
       <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -94,7 +70,7 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-function VFader({ label, value, max = 255, onChange }: { label: string; value: number; max?: number; onChange: (v: number) => void }) {
+export function VFader({ label, value, max = 255, onChange }: { label: string; value: number; max?: number; onChange: (v: number) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const pct = value / max;
   const set = (clientY: number) => {
@@ -389,24 +365,36 @@ function XYPad({ x, y, onChange }: { x: number; y: number; onChange: (x: number,
 }
 
 // ── fixture editor ──────────────────────────────────────────────────────────
-function FixtureEditor({ fx, getVal, setChannels }: { fx: PatchFixture; getVal: (u: number, ch: number) => number; setChannels: (u: Update[]) => void }) {
-  const [fixture, setFixture] = useState<Fixture | null>(null);
-  const [mode, setMode] = useState<FixtureMode | null>(null);
+export function FixtureEditor({
+  fx,
+  mode: injectedMode,
+  getVal,
+  setChannels,
+}: {
+  fx: PatchFixture;
+  mode?: FixtureMode; // supply directly (e.g. a synthetic single-head) to skip the library lookup
+  getVal: (u: number, ch: number) => number;
+  setChannels: (u: Update[]) => void;
+}) {
+  const [mode, setMode] = useState<FixtureMode | null>(injectedMode ?? null);
   const [, setTick] = useState(0);
 
   useEffect(() => {
+    if (injectedMode) {
+      setMode(injectedMode);
+      return;
+    }
     let alive = true;
     getFixture(fx.libId).then((f) => {
       if (!alive) return;
-      setFixture(f);
       setMode(f.modes.find((m) => m.name === fx.mode) || f.modes[0] || null);
     });
     return () => {
       alive = false;
     };
-  }, [fx.libId, fx.mode]);
+  }, [fx.libId, fx.mode, injectedMode]);
 
-  if (!fixture || !mode) return <div className="p-6 text-sm text-muted-foreground">Loading…</div>;
+  if (!mode) return <div className="p-6 text-sm text-muted-foreground">Loading…</div>;
 
   const u = fx.universe;
   const ch = (offset: number) => fx.address + offset - 1;
@@ -583,218 +571,53 @@ function FixtureEditor({ fx, getVal, setChannels }: { fx: PatchFixture; getVal: 
   );
 }
 
-// ── raw / unpatched channels ────────────────────────────────────────────────
-function RawEditor({ universes, channels, patch, getVal, setChannels }: { universes: number; channels: number; patch: PatchFixture[]; getVal: (u: number, ch: number) => number; setChannels: (u: Update[]) => void }) {
-  const [u, setU] = useState(0);
-  const [, setTick] = useState(0);
-  const free = useMemo(() => {
-    const owned = new Set<number>();
-    for (const f of patch) if (f.universe === u) for (let i = 0; i < f.channels; i++) owned.add(f.address + i);
-    const out: number[] = [];
-    for (let c = 1; c <= channels; c++) if (!owned.has(c)) out.push(c);
-    return out;
-  }, [u, channels, patch]);
 
-  return (
-    <div className="space-y-3 p-4">
-      <div className="flex items-center justify-between">
-        <div className="text-lg font-semibold">Unpatched channels</div>
-        <Select value={String(u)} onValueChange={(val) => setU(Number(val))}>
-          <SelectTrigger className="w-40">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {Array.from({ length: universes }, (_, i) => (
-              <SelectItem key={i} value={String(i)}>Universe {i}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <Panel title="Dimmers">
-        <div className="flex flex-wrap gap-3">
-          {free.map((c) => (
-            <VFader key={c} label={`Ch ${c}`} value={getVal(u, c)} onChange={(val) => { setChannels([{ universe: u, channel: c, value: val }]); setTick((t) => t + 1); }} />
-          ))}
-          {free.length === 0 && <div className="text-sm text-muted-foreground">Every channel is patched.</div>}
-        </div>
-      </Panel>
-    </div>
-  );
-}
-
-// ── page ──────────────────────────────────────────────────────────────────
-export function SceneEditor() {
-  const { id = "" } = useParams();
-  const navigate = useNavigate();
-  const { state } = useEngine();
-  const universes = state?.universes ?? 1;
-  const channels = state?.channels ?? 512;
-
-  const [label, setLabel] = useState("");
-  const [patch, setPatch] = useState<PatchFixture[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [saved, setSaved] = useState(true);
-  const [, setReady] = useState(0); // bumped when scene values load → re-renders controls
-
-  const valuesRef = useRef<Record<number, number[]>>({});
-  const pending = useRef<Record<string, Update>>({});
-  const flushTimer = useRef<number | null>(null);
-
-  const getVal = (uni: number, cch: number) => valuesRef.current[uni]?.[cch - 1] ?? 0;
-  function flush() {
-    flushTimer.current = null;
-    const ups = Object.values(pending.current);
-    pending.current = {};
-    if (ups.length) sceneEditSet(ups);
-  }
-  function setChannels(ups: Update[]) {
-    for (const x of ups) {
-      (valuesRef.current[x.universe] ||= new Array(channels).fill(0))[x.channel - 1] = x.value;
-      pending.current[`${x.universe}:${x.channel}`] = x;
-    }
-    setSaved(false); // changes are live but NOT persisted until Save
-    if (flushTimer.current == null) flushTimer.current = window.setTimeout(flush, 40);
-  }
-
-  // Load the scene's saved values into the editor buffer (mount + revert).
-  function applyRaw(raw: { label: string; data: number[][] }) {
-    setLabel(raw.label || `Scene ${id}`);
-    const vals: Record<number, number[]> = {};
-    raw.data.forEach((row, uni) => {
-      vals[uni] = new Array(channels).fill(0);
-      if (row) for (let c = 0; c < Math.min(channels, row.length); c++) vals[uni][c] = row[c] | 0;
+// Locate / Home — put a fixture into a known, visible state: intensity full,
+// pan/tilt centred, shutter open, open white (RGB full / colour-wheel open /
+// CMY at 0), everything else home. Returns the channel updates to apply.
+export function locateUpdates(fx: PatchFixture, mode: FixtureMode): Update[] {
+  const ups: Update[] = [];
+  const chOf = (off: number) => fx.address + off - 1;
+  const seen = new Set<string>();
+  const attrs = mode.attrs
+    .filter((a) => a.offsets?.length)
+    .filter((a) => {
+      const k = a.offsets.join(",");
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
     });
-    valuesRef.current = vals;
-    setReady((n) => n + 1); // force controls to re-read the loaded values
-  }
-
-  useEffect(() => {
-    let alive = true;
-    sceneEditBegin(id).catch(() => {});
-    getSceneRaw(id)
-      .then((raw) => alive && applyRaw(raw))
-      .catch(() => {});
-    getPatch().then((p) => alive && setPatch(p.fixtures)).catch(() => {});
-    return () => {
-      alive = false;
-      if (flushTimer.current) clearTimeout(flushTimer.current);
-      sceneEditEnd(); // discards unsaved edits (no auto-save)
+  for (const a of attrs) {
+    const nCh = a.offsets.length;
+    const declMax = a.size >= 2 ? 65535 : 255;
+    const setDeclared = (d: number) => {
+      d = Math.max(0, Math.min(declMax, Math.round(d)));
+      if (nCh >= 2) {
+        ups.push({ universe: fx.universe, channel: chOf(a.offsets[0]), value: (d >> 8) & 0xff });
+        ups.push({ universe: fx.universe, channel: chOf(a.offsets[1]), value: d & 0xff });
+      } else {
+        ups.push({ universe: fx.universe, channel: chOf(a.offsets[0]), value: (a.size >= 2 ? d >> 8 : d) & 0xff });
+      }
     };
-  }, [id, channels]);
-
-  const groups = useMemo(() => {
-    const m: Record<string, PatchFixture[]> = {};
-    for (const f of patch) (m[`${f.manufacturer} ${f.name} · ${f.mode}`] ||= []).push(f);
-    for (const k of Object.keys(m)) m[k].sort((a, b) => a.universe - b.universe || a.address - b.address);
-    return m;
-  }, [patch]);
-
-  const selectedFx = patch.find((f) => f.id === selected);
-
-  // Is any channel of this fixture non-zero in the scene being edited?
-  const fixtureLit = (f: PatchFixture) => {
-    const row = valuesRef.current[f.universe];
-    if (!row) return false;
-    for (let i = 0; i < f.channels; i++) if ((row[f.address - 1 + i] || 0) > 0) return true;
-    return false;
-  };
-
-  async function save() {
-    flush();
-    await sceneEditSave().catch(() => {});
-    setSaved(true);
+    const openSlot = () => {
+      const f = a.functions?.find((x) => /open/i.test(x.name));
+      setDeclared(f ? (Math.min(f.min, f.max) + Math.max(f.min, f.max)) / 2 : 0);
+    };
+    const n = a.name.toLowerCase();
+    if (/shutter|strobe/.test(n)) {
+      if (a.functions?.some((x) => /open/i.test(x.name))) openSlot();
+      else setDeclared(declMax); // no named "open" → full usually opens it
+    } else if (/pan|tilt/.test(n)) {
+      setDeclared(declMax / 2); // centre
+    } else if (!a.functions && /(red|green|blue|white)/.test(n)) {
+      setDeclared(declMax); // additive white
+    } else if (a.functions && (a.group === "C" || /colou?r/.test(n))) {
+      openSlot(); // colour wheel → open
+    } else if (!a.functions && a.group === "I") {
+      setDeclared(declMax); // dimmer / intensity full
+    } else {
+      setDeclared(0); // gobo, prism, frost, CMY, amber/uv, control, speed → home/open
+    }
   }
-
-  // Discard all unsaved edits: reload the scene's saved data into the engine
-  // buffer (re-solos it) and the UI controls.
-  async function revert() {
-    await sceneEditBegin(id).catch(() => {});
-    const raw = await getSceneRaw(id).catch(() => null);
-    if (raw) applyRaw(raw);
-    setSaved(true);
-  }
-
-  function goBack() {
-    if (saved || window.confirm("Discard unsaved changes and leave?")) navigate("/scenes");
-  }
-
-  return (
-    <div className="flex h-full flex-col bg-background text-foreground">
-      <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={goBack}>
-            <ArrowLeft className="h-4 w-4" /> Scenes
-          </Button>
-          <div>
-            <span className="font-semibold">{label}</span>
-            <span className="ml-2 text-xs text-muted-foreground">live editor</span>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {state?.consoleActive && <Badge variant="destructive">Desk live — output suppressed</Badge>}
-          {!saved && <span className="text-xs text-amber-400">unsaved changes</span>}
-          <Button variant="outline" onClick={revert} disabled={saved}>
-            <Undo2 className="h-4 w-4" /> Revert
-          </Button>
-          <Button onClick={save} disabled={saved}>
-            <Save className="h-4 w-4" /> Save
-          </Button>
-        </div>
-      </header>
-
-      <div className="flex min-h-0 flex-1">
-        <aside className="w-72 shrink-0 overflow-auto border-r border-border p-2">
-          {Object.keys(groups).sort().map((g) => (
-            <div key={g} className="mb-2">
-              <div className="truncate whitespace-nowrap px-2 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground" title={g}>
-                {g}
-              </div>
-              {groups[g].map((f) => (
-                <button
-                  key={f.id}
-                  onClick={() => setSelected(f.id)}
-                  title={f.label}
-                  className={cn(
-                    "flex w-full items-center gap-2 rounded py-1.5 pl-5 pr-2 text-left text-sm",
-                    selected === f.id ? "bg-accent text-accent-foreground" : "hover:bg-accent/40"
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "h-2.5 w-2.5 shrink-0 rounded-full",
-                      fixtureLit(f) ? "bg-green-500 shadow-[0_0_6px] shadow-green-500/70" : "bg-muted-foreground/30"
-                    )}
-                  />
-                  <span className="min-w-0 flex-1 truncate whitespace-nowrap">{f.label}</span>
-                  <span className="shrink-0 text-xs text-muted-foreground">U{f.universe}/{f.address}</span>
-                </button>
-              ))}
-            </div>
-          ))}
-          {patch.length === 0 && (
-            <div className="px-2 py-2 text-xs text-muted-foreground">No fixtures patched.</div>
-          )}
-          <button
-            onClick={() => setSelected("__raw__")}
-            className={cn(
-              "mt-2 flex w-full items-center rounded px-2 py-1.5 text-left text-sm",
-              selected === "__raw__" ? "bg-accent text-accent-foreground" : "hover:bg-accent/40"
-            )}
-          >
-            Unpatched channels
-          </button>
-        </aside>
-
-        <main className="min-w-0 flex-1 overflow-auto">
-          {selected === "__raw__" ? (
-            <RawEditor universes={universes} channels={channels} patch={patch} getVal={getVal} setChannels={setChannels} />
-          ) : selectedFx ? (
-            <FixtureEditor key={selectedFx.id} fx={selectedFx} getVal={getVal} setChannels={setChannels} />
-          ) : (
-            <div className="flex h-full items-center justify-center text-muted-foreground">Select a fixture to edit.</div>
-          )}
-        </main>
-      </div>
-    </div>
-  );
+  return ups;
 }

@@ -183,6 +183,7 @@ function buildConfig(fileConfig) {
   config.scenesFile = path.join(config.dataDir, "scenes.json");
   config.stateFile = path.join(config.dataDir, "state.json");
   config.patchFile = path.join(config.dataDir, "patch.json");
+  config.fixtureMapFile = path.join(config.dataDir, "fixture-map.json");
   config.fixturesDb = path.join(config.dataDir, "fixtures.db");
   config.configPath = CONFIG_PATH;
 

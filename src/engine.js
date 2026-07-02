@@ -88,6 +88,16 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     restore: null, // scene ids that were live before editing, restored on exit
   };
 
+  // Programmer: ad-hoc live control (Fixtures page). Touched channels override the
+  // scene/layer output (LTP), leaving everything else playing underneath.
+  const programmer = {
+    active: false,
+    buf: Array.from({ length: U }, () => new Uint8Array(C)),
+    touched: Array.from({ length: U }, () => new Uint8Array(C)),
+    restore: null, // scene ids that were live before the programmer took over
+    source: null, // scene id being edited, when loaded from a scene
+  };
+
   // Runtime layer state per scene id:
   //   { level: 0..1, target: 0|1, fadeFrom: 0..1, fadeStart: ms, fadeDur: ms }
   const layers = {};
@@ -245,6 +255,14 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     }
     advanceLayers(now());
     renderToCurrent();
+    if (programmer.active) {
+      for (let u = 0; u < U; u++) {
+        const t = programmer.touched[u];
+        const b = programmer.buf[u];
+        const dst = current[u];
+        for (let ch = 0; ch < C; ch++) if (t[ch]) dst[ch] = b[ch];
+      }
+    }
     outputAll();
   }
 
@@ -321,6 +339,8 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     // control commands are ignored so the edited scene can't be toggled remotely.
     sendOsc("/scene-setter/editing", [{ type: "s", value: editor.active ? String(editor.sceneId) : "" }]);
     pushVar("editing", editor.active ? String(editor.sceneId) : "", "s");
+    sendOsc("/scene-setter/programmer", [{ type: "i", value: programmer.active ? 1 : 0 }]);
+    pushVar("programmer", programmer.active ? 1 : 0, "i");
   }
 
   // Tri-state per scene: 0 = off, 1 = on (settled), 2 = fading (in or out).
@@ -616,13 +636,12 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     const parts = msg.address.split("/").filter(Boolean);
     const cmd = parts[0];
 
-    // While the scene editor is live, lock out all control commands so the edited
-    // scene can't be toggled/overridden remotely. State requests still answered.
-    if (editor.active) {
+    // While the scene editor OR the programmer is live, lock out control commands
+    // so nothing can toggle/override remotely. State requests still answered.
+    if (editor.active || programmer.active) {
       if (cmd === "state") return void broadcastState();
-      sendOsc("/scene-setter/error", [
-        { type: "s", value: `editing scene ${editor.sceneId} — controls locked` },
-      ]);
+      const what = editor.active ? `editing scene ${editor.sceneId}` : "programmer live";
+      sendOsc("/scene-setter/error", [{ type: "s", value: `${what} — controls locked` }]);
       return;
     }
 
@@ -750,6 +769,10 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
       universes: U,
       channels: C,
       editing: editor.active ? editor.sceneId : null,
+      programmerActive: programmer.active,
+      programmerFrom: programmer.active
+        ? [...new Set([programmer.source, ...(programmer.restore || [])].filter(Boolean))].filter((x) => scenes[x])
+        : [],
       consoleActive: state.consoleActive,
       consoleOverride: state.consoleOverride,
       controllerOutput: state.piOutputEnabled,
@@ -849,6 +872,109 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     return true;
   }
 
+  // ---- Programmer (live ad-hoc control) ----
+  function programmerSet(updates) {
+    const wasActive = programmer.active;
+    if (!wasActive) {
+      // Capture whatever is live right now into the programmer so editing
+      // continues from the current look, THEN stash & stop the scenes.
+      advanceLayers(now());
+      renderToCurrent();
+      for (let u = 0; u < U; u++) {
+        programmer.buf[u].set(current[u]);
+        programmer.touched[u].fill(1);
+      }
+      programmer.restore = onIds();
+      for (const id of Object.keys(layers)) if (id !== DESK_LAYER) setLayer(id, false, 0);
+      programmer.active = true;
+      if (!state.consoleActive) state.piOutputEnabled = true;
+      persist();
+      event("scene", "Programmer live — captured current look, scenes off, OSC locked");
+    }
+    for (const x of updates || []) {
+      const u = x.universe | 0;
+      const ch = (x.channel | 0) - 1;
+      const v = Math.max(0, Math.min(255, x.value | 0));
+      if (u >= 0 && u < U && ch >= 0 && ch < C) {
+        programmer.buf[u][ch] = v;
+        programmer.touched[u][ch] = 1;
+      }
+    }
+    renderAndOutput();
+    if (!wasActive) broadcastState(); // publish the scenes-off + lock state once
+    return true;
+  }
+  // Load a scene's stored look into the programmer for editing.
+  function programmerLoadScene(id) {
+    id = String(id);
+    if (!scenes[id]) return false;
+    if (!programmer.active) {
+      programmer.restore = onIds();
+      for (const l of Object.keys(layers)) if (l !== DESK_LAYER) setLayer(l, false, 0);
+      programmer.active = true;
+      if (!state.consoleActive) state.piOutputEnabled = true;
+    }
+    const data = scenes[id].data || [];
+    for (let u = 0; u < U; u++) {
+      programmer.buf[u].fill(0);
+      const row = data[u];
+      if (row) for (let ch = 0; ch < Math.min(C, row.length); ch++) programmer.buf[u][ch] = row[ch] | 0;
+      programmer.touched[u].fill(1);
+    }
+    programmer.source = id;
+    persist();
+    event("scene", `Editing scene ${id} in the programmer`);
+    renderAndOutput();
+    broadcastState();
+    return true;
+  }
+
+  function programmerClear() {
+    if (!programmer.active) return true;
+    const restore = programmer.restore || [];
+    programmer.active = false;
+    programmer.restore = null;
+    programmer.source = null;
+    for (let u = 0; u < U; u++) {
+      programmer.buf[u].fill(0);
+      programmer.touched[u].fill(0);
+    }
+    // Restore whatever scenes were live before the programmer took over.
+    for (const id of Object.keys(layers)) if (id !== DESK_LAYER) setLayer(id, false, 0);
+    for (const id of restore) if (scenes[id]) setLayer(id, true, 0);
+    persist();
+    renderAndOutput();
+    broadcastState();
+    return true;
+  }
+  // Save the current programmer look into a scene (existing id, or a new one).
+  function programmerSaveToScene(opts) {
+    if (!programmer.active) return null;
+    let id = opts && opts.sceneId != null && opts.sceneId !== "" ? String(opts.sceneId) : null;
+    if (id) {
+      if (!scenes[id]) return null;
+    } else {
+      id = createScene((opts && opts.label) || "");
+    }
+    recordScene(id); // snapshots current live output (= the programmer look)
+    programmerClear(); // release the programmer and revert to whatever was live
+    return id;
+  }
+
+  // Fixture map — UI-only layout of fixtures/heads onto the Fixtures grid.
+  function getFixtureMap() {
+    return store.readJSON(config.fixtureMapFile, { cols: 25, rows: 25, cells: {} });
+  }
+  function setFixtureMap(next) {
+    const map = {
+      cols: Math.max(1, (next && next.cols) | 0 || 25),
+      rows: Math.max(1, (next && next.rows) | 0 || 25),
+      cells: next && next.cells && typeof next.cells === "object" ? next.cells : {},
+    };
+    store.writeJSONAtomic(config.fixtureMapFile, map);
+    return map;
+  }
+
   // Replace the patch, persist, recompile the snap map, and re-render.
   function setPatch(next) {
     patch = next && Array.isArray(next.fixtures) ? next : { fixtures: [] };
@@ -867,6 +993,12 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     getDmx,
     getPatch,
     setPatch,
+    getFixtureMap,
+    setFixtureMap,
+    programmerSet,
+    programmerClear,
+    programmerLoadScene,
+    programmerSaveToScene,
     editBegin,
     editSet,
     editSave,

@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, Settings, Layers, Grid3x3, Plug } from "lucide-react";
+import { LayoutDashboard, Settings, Layers, Grid3x3, Plug, LayoutGrid } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -8,6 +8,7 @@ import { useEngine } from "@/lib/useEngine";
 const nav = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/scenes", label: "Scenes", icon: Layers, end: false },
+  { to: "/fixtures", label: "Fixtures", icon: LayoutGrid, end: false },
   { to: "/universes", label: "Universes", icon: Grid3x3, end: false },
   { to: "/patch", label: "Patch", icon: Plug, end: false },
   { to: "/config", label: "Config", icon: Settings, end: false },

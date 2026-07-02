@@ -28,6 +28,8 @@ export interface EngineState {
   universes: number;
   channels: number;
   editing?: string | null;
+  programmerActive?: boolean;
+  programmerFrom?: string[]; // scenes that were live when the programmer took over
   fixtures?: FixturesStatus;
   consoleActive: boolean;
   consoleOverride: "auto" | "on" | "off";
@@ -205,6 +207,16 @@ export interface FixtureHit {
   name: string;
   short: string;
 }
+export type FixtureKind = "par" | "chandelier" | "beam" | "wash" | "led-tape" | "led-panel";
+
+// A "head" is one physical light within a patch entry (dimmer packs have many).
+export interface FixtureHead {
+  offset: number; // 1-based channel offset within the fixture
+  span: number; // channels this head covers
+  label: string;
+  icon: FixtureKind;
+}
+
 export interface PatchFixture {
   id: string;
   libId: number;
@@ -217,6 +229,8 @@ export interface PatchFixture {
   address: number;
   fade: boolean[];
   letters?: string[];
+  icon?: FixtureKind; // used when the fixture is a single head
+  heads?: FixtureHead[]; // present for multi-dimmers / dimmer packs
 }
 
 export async function searchFixtures(q: string): Promise<FixtureHit[]> {
@@ -237,6 +251,45 @@ export async function getPatch(): Promise<{ fixtures: PatchFixture[] }> {
   return r.json();
 }
 
+// Fixture map — layout of fixtures/heads onto the Fixtures grid.
+// `cells` maps an item key → 0-based cell index (row * cols + col).
+export interface FixtureMap {
+  cols: number;
+  rows: number;
+  cells: Record<string, number>;
+}
+
+export async function getFixtureMap(): Promise<FixtureMap> {
+  const r = await fetch("/api/fixture-map");
+  if (!r.ok) throw new Error(`fixture-map → ${r.status}`);
+  return r.json();
+}
+
+export function setFixtureMap(map: FixtureMap) {
+  return postJson<FixtureMap>("/api/fixture-map", map);
+}
+
+// Programmer — live ad-hoc control from the Fixtures page.
+export function programmerSet(updates: { universe: number; channel: number; value: number }[]) {
+  return fetch("/api/programmer/set", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ updates }),
+  }).catch(() => {});
+}
+export function programmerClear() {
+  return fetch("/api/programmer/clear", { method: "POST" }).catch(() => {});
+}
+// Load a scene into the programmer for editing.
+export function programmerLoadScene(sceneId: string) {
+  return postJson<{ ok: boolean }>("/api/programmer/load", { sceneId });
+}
+// Save the current programmer look to a scene: pass { sceneId } to update, or
+// { label } to create a new scene.
+export function programmerSaveScene(opts: { sceneId?: string; label?: string }) {
+  return postJson<{ ok: boolean; id: string }>("/api/programmer/save", opts);
+}
+
 export function patchAdd(body: {
   libId: number;
   mode: string;
@@ -250,7 +303,14 @@ export function patchAdd(body: {
 
 export function patchUpdate(
   id: string,
-  body: Partial<{ universe: number; address: number; label: string; fade: boolean[] }>
+  body: Partial<{
+    universe: number;
+    address: number;
+    label: string;
+    fade: boolean[];
+    icon: FixtureKind;
+    heads: FixtureHead[] | null; // null merges back to a single head
+  }>
 ) {
   return postJson<{ fixtures: PatchFixture[] }>(`/api/patch/${encodeURIComponent(id)}`, body);
 }

@@ -304,6 +304,38 @@ function createApi(config, logger, engine) {
       return sendJson(res, engine.getPatch());
     }
 
+    if (url === "/api/fixture-map" && req.method === "GET") {
+      return sendJson(res, engine.getFixtureMap());
+    }
+    if (url === "/api/fixture-map" && req.method === "POST") {
+      return readBody(req, res, (b) => sendJson(res, engine.setFixtureMap(b)));
+    }
+
+    if (url === "/api/programmer/set" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        engine.programmerSet(Array.isArray(b.updates) ? b.updates : []);
+        sendJson(res, { ok: true });
+      });
+    }
+    if (url === "/api/programmer/clear" && req.method === "POST") {
+      engine.programmerClear();
+      return sendJson(res, { ok: true });
+    }
+    if (url === "/api/programmer/load" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        const ok = engine.programmerLoadScene(String(b.sceneId));
+        if (!ok) return badRequest(res, "scene not found", 404);
+        sendJson(res, { ok: true });
+      });
+    }
+    if (url === "/api/programmer/save" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        const id = engine.programmerSaveToScene(b || {});
+        if (!id) return badRequest(res, "nothing in the programmer, or scene not found");
+        sendJson(res, { ok: true, id });
+      });
+    }
+
     if (url === "/api/patch/add" && req.method === "POST") {
       return readBody(req, res, (b) => {
         const l = library();
@@ -317,6 +349,8 @@ function createApi(config, logger, engine) {
         const channels = mode.channels || fade.length || 1;
         const baseLabel = typeof b.label === "string" && b.label ? b.label : fx.name;
         const count = Math.max(1, Math.min(512, b.count | 0 || 1));
+        const icon = guessIcon(fx);
+        const heads = computeHeads(mode); // null unless it's a multi-dimmer
 
         if (channels > config.channels) return badRequest(res, "Fixture is larger than one universe");
 
@@ -342,6 +376,8 @@ function createApi(config, logger, engine) {
             address: addr,
             fade: [...fade], // own copy so per-channel overrides are independent
             letters,
+            icon,
+            heads: heads ? heads.map((h) => ({ ...h })) : undefined,
           });
           addr += channels;
           added++;
@@ -362,6 +398,16 @@ function createApi(config, logger, engine) {
         if (b.address !== undefined) fx.address = Math.max(1, b.address | 0);
         if (typeof b.label === "string") fx.label = b.label;
         if (Array.isArray(b.fade)) fx.fade = b.fade.map((x) => x !== false);
+        if (typeof b.icon === "string") fx.icon = b.icon;
+        if (b.heads === null) fx.heads = undefined; // merge back to a single head
+        else if (Array.isArray(b.heads)) {
+          fx.heads = b.heads.map((h) => ({
+            offset: Math.max(1, h.offset | 0),
+            span: Math.max(1, h.span | 0 || 1),
+            label: typeof h.label === "string" ? h.label : "",
+            icon: typeof h.icon === "string" ? h.icon : "par",
+          }));
+        }
         engine.setPatch(patch);
         sendJson(res, engine.getPatch());
       });
@@ -399,6 +445,44 @@ function createApi(config, logger, engine) {
 
     serveStatic(url, res);
   });
+
+  // Best-guess default icon from the fixture name (user can override in Patch).
+  function guessIcon(fx) {
+    const s = `${fx.manufacturer || ""} ${fx.name || ""}`.toLowerCase();
+    if (/chandelier/.test(s)) return "chandelier";
+    if (/\bbeam\b/.test(s)) return "beam";
+    if (/wash/.test(s) && /(moving|head|zoom|yoke)/.test(s)) return "wash";
+    if (/(moving\s*head|spot|profile|hybrid|yoke)/.test(s)) return "beam";
+    if (/(tape|strip|pixel|batten|\bbar\b)/.test(s)) return "led-tape";
+    if (/(panel|blinder|flood|matrix|\bpar\b|wash)/.test(s)) return /par/.test(s) ? "par" : "led-panel";
+    return "par";
+  }
+
+  // If every channel of a mode is an independent single-channel dimmer (a dimmer
+  // pack / multi-dimmer), return one head per channel; otherwise null.
+  function computeHeads(mode) {
+    const attrs = (mode.attrs || []).filter((a) => a.offsets && a.offsets.length);
+    const seen = new Set();
+    const uniq = [];
+    for (const a of attrs) {
+      const k = a.offsets.join(",");
+      if (!seen.has(k)) {
+        seen.add(k);
+        uniq.push(a);
+      }
+    }
+    const dimmers = uniq.filter(
+      (a) => !a.functions && a.offsets.length === 1 && (a.group === "I" || /dim/i.test(a.name))
+    );
+    const chans = mode.channels || uniq.length;
+    if (dimmers.length > 1 && dimmers.length === chans) {
+      return dimmers
+        .slice()
+        .sort((a, b) => a.offsets[0] - b.offsets[0])
+        .map((a, i) => ({ offset: a.offsets[0], span: 1, label: `Dimmer ${i + 1}`, icon: "par" }));
+    }
+    return null;
+  }
 
   function badRequest(res, error, code = 400) {
     res.writeHead(code, { "Content-Type": "application/json" });

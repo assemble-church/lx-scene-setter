@@ -20,6 +20,8 @@ import {
 } from "@/components/ui/select";
 import { UniverseGrid } from "@/components/UniverseGrid";
 import { Plus, Trash2, Search } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { FixtureIcon, FIXTURE_KINDS } from "@/components/fixture-icons";
 import { useEngine } from "@/lib/useEngine";
 import {
   searchFixtures,
@@ -32,6 +34,8 @@ import {
   type FixtureHit,
   type Fixture,
   type PatchFixture,
+  type FixtureKind,
+  type FixtureHead,
 } from "@/lib/api";
 
 function snapChannels(fade: boolean[]) {
@@ -359,6 +363,129 @@ function SnapDialog({
   );
 }
 
+// ── Icon picker (row of the fixture icons) ─────────────────────────────────
+function IconPicker({ value, onPick }: { value?: FixtureKind; onPick: (k: FixtureKind) => void }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {FIXTURE_KINDS.map(({ key, label }) => (
+        <button
+          key={key}
+          title={label}
+          onClick={() => onPick(key)}
+          className={cn(
+            "flex h-10 w-10 items-center justify-center rounded-md border transition-colors",
+            value === key
+              ? "border-primary text-foreground ring-2 ring-primary"
+              : "border-border/60 text-muted-foreground hover:border-foreground/40"
+          )}
+        >
+          <FixtureIcon kind={key} className="h-6 w-6" />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── Icon / heads editor ────────────────────────────────────────────────────
+function IconsDialog({
+  entry,
+  onClose,
+  onSaved,
+}: {
+  entry: PatchFixture | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [icon, setIcon] = useState<FixtureKind>("par");
+  const [heads, setHeads] = useState<FixtureHead[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!entry) return;
+    setIcon(entry.icon ?? "par");
+    setHeads(entry.heads ? entry.heads.map((h) => ({ ...h })) : null);
+  }, [entry]);
+
+  const patchHead = (i: number, patch: Partial<FixtureHead>) =>
+    setHeads((hs) => (hs ? hs.map((h, idx) => (idx === i ? { ...h, ...patch } : h)) : hs));
+
+  const splitAll = () =>
+    setHeads(
+      Array.from({ length: entry?.channels ?? 1 }, (_, i) => ({
+        offset: i + 1,
+        span: 1,
+        label: `Head ${i + 1}`,
+        icon,
+      }))
+    );
+
+  async function save() {
+    if (!entry) return;
+    setBusy(true);
+    try {
+      await patchUpdate(entry.id, heads ? { heads } : { icon, heads: null });
+      onSaved();
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={!!entry} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Icon — {entry?.label}</DialogTitle>
+          <DialogDescription>
+            {heads
+              ? "This fixture is split into heads — each is a separate light on the Fixtures page."
+              : "Pick the icon shown on the Fixtures page. Dimmer packs can be split into one head per channel."}
+          </DialogDescription>
+        </DialogHeader>
+
+        {entry && heads ? (
+          <div className="max-h-96 space-y-2 overflow-auto">
+            {heads.map((h, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-3 rounded border border-border/50 p-2">
+                <span className="w-16 shrink-0 text-xs tabular-nums text-muted-foreground">
+                  ch {entry.address + h.offset - 1}
+                </span>
+                <Input
+                  className="h-8 w-36"
+                  value={h.label}
+                  onChange={(e) => patchHead(i, { label: e.target.value })}
+                />
+                <IconPicker value={h.icon} onPick={(k) => patchHead(i, { icon: k })} />
+              </div>
+            ))}
+            <Button variant="outline" size="sm" onClick={() => setHeads(null)}>
+              Merge into a single fixture
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <IconPicker value={icon} onPick={setIcon} />
+            {entry && entry.channels > 1 && (
+              <Button variant="outline" size="sm" onClick={splitAll}>
+                Split into {entry.channels} heads (one per channel)
+              </Button>
+            )}
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={save} disabled={busy}>
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function Patch() {
   const { state } = useEngine();
   const universes = state?.universes ?? 1;
@@ -370,6 +497,7 @@ export function Patch() {
   const [results, setResults] = useState<FixtureHit[]>([]);
   const [adding, setAdding] = useState<FixtureHit | null>(null);
   const [snapEdit, setSnapEdit] = useState<PatchFixture | null>(null);
+  const [iconEdit, setIconEdit] = useState<PatchFixture | null>(null);
 
   const refresh = () => getPatch().then((p) => setPatch(p.fixtures)).catch(() => {});
   useEffect(() => {
@@ -471,6 +599,7 @@ export function Patch() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border text-left text-muted-foreground">
+                  <th className="w-16 px-4 py-2 font-medium">Icon</th>
                   <th className="px-4 py-2 font-medium">Label</th>
                   <th className="px-4 py-2 font-medium">Fixture</th>
                   <th className="px-4 py-2 font-medium">Mode</th>
@@ -483,6 +612,16 @@ export function Patch() {
               <tbody>
                 {patch.map((fx) => (
                   <tr key={fx.id} className="border-b border-border/40 last:border-0">
+                    <td className="px-4 py-2">
+                      <button
+                        onClick={() => setIconEdit(fx)}
+                        title="Assign icon"
+                        className="flex items-center gap-1 rounded-md border border-border/60 px-2 py-1 text-muted-foreground hover:border-foreground/40 hover:text-foreground"
+                      >
+                        <FixtureIcon kind={fx.heads?.length ? fx.heads[0].icon : fx.icon ?? "par"} className="h-5 w-5" />
+                        {fx.heads?.length ? <span className="text-xs tabular-nums">×{fx.heads.length}</span> : null}
+                      </button>
+                    </td>
                     <td className="px-4 py-2">
                       <Input
                         defaultValue={fx.label}
@@ -551,6 +690,7 @@ export function Patch() {
         onAdded={refresh}
       />
       <SnapDialog entry={snapEdit} onClose={() => setSnapEdit(null)} onSaved={refresh} />
+      <IconsDialog entry={iconEdit} onClose={() => setIconEdit(null)} onSaved={refresh} />
     </div>
   );
 }
