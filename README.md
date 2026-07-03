@@ -42,6 +42,12 @@ the desk still controls the rig directly. The Pi is purely additive insurance.
   universes it needs, and it shows up in tools like DMX Workshop.
 - **Production-ready**: atomic crash-safe writes, runs as a systemd service with
   auto-restart and boot start, never blacks out on restart.
+- **Fixture library & patching** — import Avolites personalities, patch fixtures
+  (with counts, auto-addressing and per-channel snap/fade), and give each an icon.
+- **Web-based moving-light programmer** — an Avolites-style fixture grid and a
+  live programmer for building looks (intensity, colour, pan/tilt, gobo…) and
+  saving them straight to scenes, all in the browser.
+- **Terminal Art-Net monitor** — a standalone CLI to visualise any Art-Net stream.
 
 ## How it works
 
@@ -132,6 +138,73 @@ Production build + run (what the Pi does):
 npm run build          # builds ui/ → ui/dist (served by the engine)
 npm start              # engine only; UI served at :8080
 ```
+
+## Web UI
+
+The control panel at `http://<pi-ip>:8080` (or the Vite dev URL) is a dark,
+single-page app; every page shares one live WebSocket to the engine.
+
+### Dashboard
+At-a-glance state: per-scene level bars, live fade countdowns, console / output
+status badges, and a rolling activity log.
+
+### Scenes
+All recorded scenes with inline label editing. Per scene: **Activate / Deactivate**
+(with fade), **Record** (snapshot the current output), **Edit** (opens the fixture
+programmer with that scene loaded — see below), raw-JSON edit, and delete.
+
+### Fixtures — the programmer
+An Avolites-style grid where each patched fixture (or dimmer-pack **head**) is a cell:
+
+- **Live icons** — each cell shows a fixture-type icon (par, moving-head beam /
+  wash, chandelier, LED tape, LED panel) **tinted by that fixture's live output**
+  (colour + dim level), updating in real time.
+- **Hover** a cell for a card with manufacturer, model, mode, universe, start
+  address and channel range.
+- **Right-click → Move** (then click another cell to place; swaps if occupied) to
+  arrange the grid to match the room. The layout persists to `data/fixture-map.json`;
+  with no map yet, fixtures are laid out in patch order.
+- **Right-click → Locate** to throw a fixture into a known, visible state
+  (intensity full, pan/tilt centred, open white, shutter open).
+- **Click a fixture** to open the **programmer** — an editor sweeps up from the
+  bottom with purpose-built controls per attribute: a vertical **dimmer** fader,
+  an HSV **colour mixer** (or colour-wheel swatches), a **pan/tilt XY pad**, and
+  tile/radio pickers for gobo / prism / shutter / etc. (with a **rate slider** when
+  a slot is a continuous scale such as strobe or spin speed) — plus a **raw
+  per-channel fader bank**.
+- **Shift-click several** fixtures (or heads) and release Shift → the editor opens
+  on the whole selection. Controls are unified **by role**, so one Dimmer drives
+  every intensity channel across mixed fixture types, one colour control drives them
+  all — including **cross-model** (a colour-wheel pick tints RGB fixtures; an RGB
+  mix snaps colour wheels to their nearest slot).
+
+**How the programmer behaves:** starting to edit **captures the current live look**,
+stops the underlying scenes (stashing which were up), and takes over output — OSC
+scene commands are locked while it's live. **Save scene** stores the look (update an
+existing scene — the one you were editing is offered first — or create a new one),
+then releases the programmer and restores whatever was playing. **Clear programmer**
+discards and restores.
+
+### Universes
+Live DMX grids for every universe (colour-mapped by value) — exactly what's on the
+wire, desk or house.
+
+### Patch & Personalities
+- **Import a fixture library** by uploading Avolites' personality `.exe`; the Pi
+  extracts and parses it (~21k fixtures) into a local SQLite database, searchable by
+  manufacturer / name. *You supply your own file — no library is distributed.*
+- **Patch** fixtures to a universe / address, with a **count** for consecutive
+  patching and a smart next-free-address suggestion (wraps universes when full).
+- **Per-channel snap vs fade** — auto-derived from the personality (overridable) so
+  shutters and control channels jump while levels crossfade.
+- **Assign an icon** per fixture and **split dimmer packs into heads** so each
+  channel shows as its own light on the Fixtures grid.
+- A live **patch grid** visualises the addressing.
+
+### Config
+Edit `config.jsonc` from the browser — a **form** (console, Art-Net + output nodes,
+Companion feedback / variables, timing) or the **raw** annotated file, both validated
+on save, with a restart button (in production).
 
 ## Configuration (`config.jsonc`)
 
@@ -293,6 +366,28 @@ On startup the Pi logs `Art-Net: receiving universe N from desk …` the first t
 it sees each universe — use that to confirm the numbering matches your patch (some
 consoles are 0-based, some 1-based).
 
+## Terminal Art-Net monitor
+
+`artnet-monitor.js` is a standalone, dependency-free CLI that turns any terminal
+into an Art-Net receiver / visualiser — handy for confirming what this controller
+(or a desk) is actually putting on the wire.
+
+```bash
+node artnet-monitor.js --u 6          # visualise 6 universes (0..5)
+node artnet-monitor.js --u 2 --port 6455
+./artnet-monitor.js --u 4             # it's executable too
+```
+
+Flags: `--u` universe count (default 4), `--port` (default 6454), `--host`
+(default 0.0.0.0). It goes full-screen and draws every channel as a live `[000]`
+grid — one block per universe with an **alternating dark / grey background** and a
+`● live / ○ idle` header — values colour-graded by level. Ctrl-C to quit.
+
+Because the controller already listens on 6454, to watch it on the **same machine**
+run the monitor on another port and add a matching **Art-Net output** in Config
+(e.g. `ip 127.0.0.1, port 6455`). On a different machine, use the default 6454 and
+point an output at its IP.
+
 ## Troubleshooting
 
 - **Companion connection shows red** — its Source/listen port clashes with
@@ -306,8 +401,11 @@ consoles are 0-based, some 1-based).
 
 ## Notes & limitations
 
-- Designed for **intensity** channels (dimmers) using HTP merging. It's not a
-  moving-light console — there's no per-attribute LTP/colour logic.
+- **Scene playback is HTP** — scenes are full-output snapshots merged
+  highest-takes-precedence, ideal for intensity / house looks. The **programmer**
+  (Fixtures page) adds per-fixture, per-attribute editing (colour, pan/tilt, gobo…)
+  for *building* looks, but live scene **layering** is still HTP — it's not a full
+  tracking moving-light console.
 - It never blacks out on exit, so a service restart won't drop a live venue.
 - Scenes are full snapshots stored as JSON (`data/scenes.json`); small and
   human-inspectable, written atomically.
