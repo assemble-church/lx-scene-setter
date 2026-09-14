@@ -305,9 +305,12 @@ export function ConfigPage() {
                 <div className="mb-1 text-sm">Output nodes</div>
                 <div className="mb-2 text-xs text-muted-foreground">
                   Universe numbers are the Art-Net Port-Address: a node set to Subnet 0 / Universe 0 is
-                  universe 0, Subnet 0 / Universe 1 is 1, Subnet 1 / Universe 0 is 16. Don't know a
-                  node's IP? Leave it blank (or press <b>Broadcast</b>) — every node on the network
-                  gets the packets and picks out its own universe.
+                  universe 0, Subnet 0 / Universe 1 is 1, Subnet 1 / Universe 0 is 16. For the IP, use
+                  the node's <b>own IP</b> where you can — only that node receives the traffic. If you
+                  don't know it, use its network's broadcast address (e.g. <code>169.254.255.255</code> for
+                  a node that gives itself a 169.254.x.x address, like a Botex DPX NET), or leave it blank /
+                  press <b>Broadcast</b> — then every device on the network receives the packets. See
+                  "How outputs are sent" below.
                 </div>
                 <div className="space-y-2">
                   {cfg.artnet.outputs.map((o, i) => (

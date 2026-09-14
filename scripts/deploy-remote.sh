@@ -55,6 +55,35 @@ if ! command -v 7zz >/dev/null && ! command -v 7z >/dev/null; then
   apt-get install -y -qq 7zip >/dev/null || apt-get install -y -qq p7zip-full >/dev/null
 fi
 
+# ---- Link-local address for self-addressed Art-Net devices --------------------
+# Some nodes (e.g. Botex DPX NET dimmers) give themselves a 169.254.x.x address and
+# only accept Art-Net sent to 169.254.255.255, which needs an address in that range
+# on the port they're cabled to. Added ALONGSIDE the DHCP address, never replacing
+# it: persisted in NetworkManager for the next boot (no reapply, so no network blip)
+# and added live now. LINK_LOCAL_ADDR=none skips this.
+LINK_LOCAL_ADDR="${LINK_LOCAL_ADDR:-169.254.50.50/16}"
+if [ "$LINK_LOCAL_ADDR" != "none" ]; then
+  LL_DEV="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
+  LL_IP="${LINK_LOCAL_ADDR%/*}"
+  if [ -z "$LL_DEV" ]; then
+    echo "    link-local: no default-route interface found — skipped"
+  else
+    if command -v nmcli >/dev/null; then
+      LL_CON="$(nmcli -g GENERAL.CONNECTION device show "$LL_DEV" 2>/dev/null | head -1)"
+      if [ -n "$LL_CON" ] && ! nmcli -g ipv4.addresses connection show "$LL_CON" 2>/dev/null | grep -q "$LL_IP/"; then
+        nmcli connection modify "$LL_CON" +ipv4.addresses "$LINK_LOCAL_ADDR" \
+          && log "Link-local: $LINK_LOCAL_ADDR saved on '$LL_CON' ($LL_DEV) for future boots" \
+          || echo "WARNING: couldn't save $LINK_LOCAL_ADDR in NetworkManager (continuing)" >&2
+      fi
+    fi
+    if ! ip -4 addr show dev "$LL_DEV" | grep -q "inet $LL_IP/"; then
+      ip addr add "$LINK_LOCAL_ADDR" brd + dev "$LL_DEV" \
+        && echo "    link-local: $LINK_LOCAL_ADDR added to $LL_DEV now" \
+        || echo "WARNING: couldn't add $LINK_LOCAL_ADDR to $LL_DEV (continuing)" >&2
+    fi
+  fi
+fi
+
 # ---- Service user + directories ----------------------------------------------
 if ! id -u "$SVC_USER" >/dev/null 2>&1; then
   log "Creating system user $SVC_USER"

@@ -51,7 +51,7 @@ trap cleanup EXIT
 # Open the shared master connection up front (background, no command).
 ssh "${SSH_OPTS[@]}" -o ControlMaster=yes -o ConnectTimeout=15 -fN "$TARGET"
 
-FILES=(src package.json package-lock.json config.example.jsonc artnet-monitor.js README.md LICENSE ui/dist scripts/deploy-remote.sh)
+FILES=(src package.json package-lock.json config.example.jsonc artnet-monitor.js README.md LICENSE ui/dist scripts/deploy-remote.sh scripts/find-devices.js)
 
 echo "==> Copying bundle to $TARGET:$REMOTE_STAGE"
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --exclude .DS_Store -czf - "${FILES[@]}" \

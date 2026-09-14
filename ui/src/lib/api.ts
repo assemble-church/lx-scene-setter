@@ -193,10 +193,21 @@ export interface ArtnetSender {
   isConsole: boolean;
   lastSeen: number;
 }
+// How a saved output is actually leaving the machine.
+export interface ArtnetOutputRoute {
+  name: string;
+  ip: string;
+  universes: number[];
+  mode: "unicast" | "subnet-broadcast" | "broadcast" | "routed";
+  via: string[];
+  packetsPerUpdate: number;
+  warning?: string;
+}
 export interface ArtnetNetwork {
   nodes: ArtnetNode[];
   senders: ArtnetSender[];
   interfaces: { name: string; address: string; netmask: string; broadcast: string }[];
+  outputs: ArtnetOutputRoute[];
   polled?: string[];
 }
 

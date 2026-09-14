@@ -1,9 +1,10 @@
 // Art-Net I/O.
 //
-// Output: builds and sends ArtDMX packets to configured nodes. A node's IP may be
-//         a unicast address or a broadcast address (255.255.255.255, or a subnet's
-//         x.x.x.255) for nodes whose IP you don't know — they pick out their own
-//         universe from the packet.
+// Output: builds and sends ArtDMX packets to configured nodes. A node's IP should
+//         be its own address (unicast — nothing else on the network sees the
+//         traffic). For a node whose IP you don't know, use a broadcast address —
+//         ideally the node's subnet (e.g. 169.254.255.255), else 255.255.255.255 —
+//         which every device on that network receives. See route().
 // Input:  listens for ArtDMX from the console (to record), answers ArtPoll
 //         discovery with ArtPollReply so controllers/tools can find us, and can
 //         itself send ArtPoll to discover the nodes on the network.
@@ -88,7 +89,7 @@ function createArtnetOutput(config, logger) {
       for (const [addr, iface] of current) {
         if (ifaceSockets.has(addr)) continue;
         const s = dgram.createSocket({ type: "udp4", reuseAddr: true });
-        const entry = { socket: s, address: addr, netmask: iface.netmask, broadcast: iface.broadcast, ready: false };
+        const entry = { socket: s, name: iface.name, address: addr, netmask: iface.netmask, broadcast: iface.broadcast, ready: false };
         s.on("error", (err) => logger.error(`Art-Net socket ${addr}:${config.artnetPort} error:`, err.message));
         s.on("message", (msg, rinfo) => receivers.forEach((fn) => fn(msg, rinfo)));
         s.bind(config.artnetPort, addr, () => {
@@ -110,21 +111,75 @@ function createArtnetOutput(config, logger) {
     return a.length === 4 && a.every((x, i) => (x & m[i]) === (b[i] & m[i]));
   };
 
-  // Send an Art-Net packet as a broadcast out of every interface, to both the
-  // limited (255.255.255.255) and that interface's directed broadcast address.
-  function broadcast(packet, port) {
-    for (const e of interfaceSockets()) {
-      send(e.socket, packet, port, "255.255.255.255", `broadcast via ${e.address}`);
-      send(e.socket, packet, port, e.broadcast, `${e.broadcast} via ${e.address}`);
+  // How a packet for `ip` leaves this machine — ONE copy per destination, so a
+  // universe update is one packet on the wire (not one per address/interface).
+  //   unicast           — ip is in one of our subnets: sent from that interface,
+  //                       only that device receives it. Preferred.
+  //   subnet-broadcast  — ip is one of our subnets' broadcast address (e.g.
+  //                       169.254.255.255): sent once, from that interface, to
+  //                       every device on that network. Some nodes (Botex DPX NET)
+  //                       only accept this form.
+  //   broadcast         — 255.255.255.255 / blank: once per physical port.
+  //   routed            — anywhere else: handed to the OS routing table.
+  // Returns { mode, sends: [{ socket, dest, via }], warning? }.
+  function route(ip) {
+    const entries = interfaceSockets();
+    if (!ip || ip === "255.255.255.255") {
+      const perPort = new Map();
+      for (const e of entries) if (!perPort.has(e.name)) perPort.set(e.name, e);
+      return {
+        mode: "broadcast",
+        sends: [...perPort.values()].map((e) => ({ socket: e.socket, dest: "255.255.255.255", via: `${e.name} ${e.address}` })),
+        warning: perPort.size ? undefined : "no network interface is up",
+      };
     }
+    const bcast = entries.find((e) => e.broadcast === ip);
+    if (bcast) return { mode: "subnet-broadcast", sends: [{ socket: bcast.socket, dest: ip, via: `${bcast.name} ${bcast.address}` }] };
+    const local = entries.find((e) => sameSubnet(ip, e));
+    if (local) return { mode: "unicast", sends: [{ socket: local.socket, dest: ip, via: `${local.name} ${local.address}` }] };
+    // 169.254.x.x is never routed: without an address in that range there's no way
+    // to reach it, so don't spray packets at the router — report it instead.
+    if (ip.startsWith("169.254.")) {
+      return {
+        mode: "routed",
+        sends: [],
+        warning:
+          "not sending: no network port has a 169.254.x.x address, so a self-addressed device can't be reached — add one (e.g. 169.254.50.50/16) to the port it's cabled to",
+      };
+    }
+    return {
+      mode: "routed",
+      sends: [{ socket, dest: ip, via: "OS routing (default gateway)" }],
+      warning: ip.endsWith(".255")
+          ? "looks like a broadcast address, but no network port is in that range — it will go to the router and be dropped"
+          : undefined,
+    };
+  }
+
+  // Send any Art-Net packet as a broadcast, once per physical port.
+  function broadcast(packet, port) {
+    for (const s of route("255.255.255.255").sends) send(s.socket, packet, port, s.dest, `broadcast via ${s.via}`);
   }
 
   function sendUniverse(ip, port, universe, values) {
     const packet = buildDmx(universe, values);
-    if (ip === "255.255.255.255") return broadcast(packet, port);
-    // Unicast from port 6454 on the interface facing the node, when there is one.
-    const entry = interfaceSockets().find((e) => sameSubnet(ip, e));
-    send(entry ? entry.socket : socket, packet, port, ip, ip);
+    for (const s of route(ip).sends) send(s.socket, packet, port, s.dest, s.dest === ip ? ip : `${s.dest} via ${s.via}`);
+  }
+
+  // For the UI: how each configured output is actually being sent right now.
+  function describeOutputs(outputs) {
+    return (outputs || []).map((o) => {
+      const r = route((o.ip || "").trim() || "255.255.255.255");
+      return {
+        name: o.name,
+        ip: o.ip,
+        universes: o.universes,
+        mode: r.mode,
+        via: r.sends.map((s) => s.via),
+        packetsPerUpdate: r.sends.length * (o.universes || []).length,
+        warning: r.warning,
+      };
+    });
   }
 
   // Register a handler for packets arriving on the per-interface sockets.
@@ -174,7 +229,7 @@ function createArtnetOutput(config, logger) {
     }
   }
 
-  return { sendUniverse, broadcast, onMessage, close };
+  return { sendUniverse, broadcast, describeOutputs, onMessage, close };
 }
 
 // Pick the local IPv4 interface facing the desk (same /24), else the first
@@ -318,6 +373,7 @@ function createArtnetInput(config, logger, onDmx, output) {
       nodes: [...nodes.values()].sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }) || a.bindIndex - b.bindIndex),
       senders: [...senders.values()].map((s) => ({ ...s, universes: [...s.universes].sort((a, b) => a - b) })),
       interfaces: localInterfaces().map(({ name, address, netmask, broadcast }) => ({ name, address, netmask, broadcast })),
+      outputs: output ? output.describeOutputs(config.outputs) : [],
     };
   }
 

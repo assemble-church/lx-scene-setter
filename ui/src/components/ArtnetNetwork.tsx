@@ -7,8 +7,16 @@ import {
   getArtnetNetwork,
   portAddressLabel,
   type ArtnetNetwork as Network,
+  type ArtnetOutputRoute,
   type OutputNode,
 } from "@/lib/api";
+
+const MODE_TEXT: Record<ArtnetOutputRoute["mode"], { label: string; detail: string; tone: "secondary" | "warning" }> = {
+  unicast: { label: "direct", detail: "only that device receives it", tone: "secondary" },
+  "subnet-broadcast": { label: "subnet broadcast", detail: "every device on that network receives it", tone: "warning" },
+  broadcast: { label: "broadcast", detail: "every device on the network receives it", tone: "warning" },
+  routed: { label: "via router", detail: "not on a local network", tone: "secondary" },
+};
 
 const ago = (t: number) => {
   const s = Math.round((Date.now() - t) / 1000);
@@ -57,6 +65,41 @@ export function ArtnetNetwork({ onAdd, port }: { onAdd: (node: OutputNode) => vo
         </Button>
       </div>
       {error && <p className="text-sm text-destructive">{error}</p>}
+
+      <div>
+        <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          How outputs are sent (saved config)
+        </div>
+        {net?.outputs.length ? (
+          <div className="space-y-1">
+            {net.outputs.map((o, i) => {
+              const m = MODE_TEXT[o.mode];
+              return (
+                <div key={i} className="rounded border border-border/50 px-2 py-1.5 text-sm">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span className="font-medium">{o.name || "(unnamed)"}</span>
+                    <span className="font-mono text-xs tabular-nums">{o.ip || "(blank)"}</span>
+                    <Badge variant={m.tone}>{m.label}</Badge>
+                    <span className="text-xs text-muted-foreground">
+                      {m.detail} · via {o.via.join(", ") || "—"} · {o.packetsPerUpdate} packet
+                      {o.packetsPerUpdate === 1 ? "" : "s"} per update
+                    </span>
+                  </div>
+                  {o.warning && <div className="mt-1 text-xs text-destructive">{o.warning}</div>}
+                </div>
+              );
+            })}
+            {net.outputs.some((o) => o.mode === "broadcast" || o.mode === "subnet-broadcast") && (
+              <p className="text-xs text-muted-foreground">
+                Broadcasts reach every device on the network (up to 25 updates/s per universe during fades). Once
+                you know a node's own IP, enter it instead so only that node receives the traffic.
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">No outputs saved.</p>
+        )}
+      </div>
 
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Nodes (ArtPoll replies)</div>

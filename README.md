@@ -410,6 +410,53 @@ On startup the Pi logs `Art-Net: receiving universe N from desk …` the first t
 it sees each universe — use that to confirm the numbering matches your patch (some
 consoles are 0-based, some 1-based).
 
+### Sending on a shared network (no lighting VLAN)
+
+Art-Net can share the building network with everything else, as long as it isn't
+broadcast. Each output's `ip` decides who receives the traffic — **Config → Art-Net →
+How outputs are sent** shows exactly how each saved output leaves the machine:
+
+| `ip` | Mode | Who receives it |
+| --- | --- | --- |
+| the node's own IP | direct (unicast) | only that node — **use this whenever you can** |
+| the node's network broadcast, e.g. `169.254.255.255` | subnet broadcast | every device on that network |
+| blank or `255.255.255.255` | broadcast | every device on the network |
+
+Broadcasts are one packet per universe per update — once a second when idle, up to
+25/s during fades — and every device (including Wi-Fi clients) has to receive
+them, so treat them as a way to get started, then switch to the node's own IP.
+
+All Art-Net is sent from port 6454, out of the network port that faces the node
+(on a Mac with Wi-Fi and a USB Ethernet adapter, broadcasts otherwise only ever
+leave via Wi-Fi).
+
+### Nodes that give themselves a 169.254.x.x address (Botex DPX NET)
+
+Some nodes have no IP setting: they self-assign a link-local `169.254.x.x` address,
+never answer ArtPoll, and **only accept Art-Net addressed to `169.254.255.255`** —
+`255.255.255.255` and the building subnet's broadcast are ignored. The Botex
+DPX-1210T NET behaves like this. To drive one:
+
+1. On the node: set its Art-Net SubNet/Universe, and (Botex) **SETUP → Protocol
+   Assign** each channel to **A** — confirm with ENTER; ESC or a 5 s timeout discards.
+2. The sender needs an address in `169.254.0.0/16` on the port the node is cabled
+   to. `scripts/deploy.sh` adds `169.254.50.50/16` to the Pi's main port (alongside
+   its DHCP address, saved in NetworkManager); override with
+   `LINK_LOCAL_ADDR=169.254.x.y/16` or disable with `LINK_LOCAL_ADDR=none`.
+3. Set the output's IP to `169.254.255.255` — then, better, find the node's own
+   address and use that:
+
+   ```bash
+   node scripts/find-devices.js            # scans every 169.254 range we're on (~4 min)
+   node scripts/find-devices.js 192.168.1.0/24
+   ```
+
+   It lists every device that answers ARP (IP + MAC), which includes nodes that
+   ignore everything else. Run it on the Pi (`node /opt/scene-setter/current/scripts/find-devices.js`).
+
+The lighting desk has the same constraint: to reach such a node it too needs a
+169.254.x.x address on its network port (or use the node's own IP once known).
+
 ## Terminal Art-Net monitor
 
 `artnet-monitor.js` is a standalone, dependency-free CLI that turns any terminal

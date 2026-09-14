@@ -13,9 +13,15 @@
     "localIp": "",              // IP advertised in ArtPollReply; blank = auto-detect
     "universes": 6,             // universe count (valid numbers 0..universes-1)
     "channels": 512,            // DMX channels per universe
-    "outputs": [                // nodes we drive on failover ("port" optional)
+    // Nodes we drive on failover ("port" optional). "ip" is, in order of preference:
+    //   the node's own IP      — only that node receives the traffic
+    //   its subnet broadcast   — e.g. "169.254.255.255" for a node that self-assigns
+    //                            169.254.x.x (Botex DPX NET); needs a 169.254 address here
+    //   "" or 255.255.255.255  — every device on the network receives it
+    // Universe = Art-Net Port-Address: Subnet 0/Universe 1 → 1, Subnet 1/Universe 0 → 16.
+    "outputs": [
       { "name": "Chauvet Net-X II", "ip": "10.10.20.1", "port": 6454, "universes": [2, 3, 4, 5] },
-      { "name": "Botex Dimmer",     "ip": "10.10.20.2", "port": 6454, "universes": [1] }
+      { "name": "Botex Dimmer",     "ip": "169.254.255.255", "port": 6454, "universes": [0] }
     ]
   },
 
