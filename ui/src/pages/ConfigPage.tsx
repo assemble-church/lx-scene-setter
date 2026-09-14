@@ -10,9 +10,13 @@ import {
   getConfig,
   saveConfig,
   restartService,
+  portAddressLabel,
+  BROADCAST_IP,
   type ConfigShape,
+  type OutputNode,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { ArtnetNetwork } from "@/components/ArtnetNetwork";
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
@@ -299,9 +303,16 @@ export function ConfigPage() {
               </Row>
               <div className="pt-2">
                 <div className="mb-1 text-sm">Output nodes</div>
+                <div className="mb-2 text-xs text-muted-foreground">
+                  Universe numbers are the Art-Net Port-Address: a node set to Subnet 0 / Universe 0 is
+                  universe 0, Subnet 0 / Universe 1 is 1, Subnet 1 / Universe 0 is 16. Don't know a
+                  node's IP? Leave it blank (or press <b>Broadcast</b>) — every node on the network
+                  gets the packets and picks out its own universe.
+                </div>
                 <div className="space-y-2">
                   {cfg.artnet.outputs.map((o, i) => (
-                    <div key={i} className="flex flex-wrap items-center gap-2">
+                    <div key={i} className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
                       <Input
                         placeholder="Name"
                         value={o.name}
@@ -315,7 +326,7 @@ export function ConfigPage() {
                         className="h-8 w-36"
                       />
                       <Input
-                        placeholder="IP"
+                        placeholder="blank = broadcast"
                         value={o.ip}
                         onChange={(e) =>
                           patch("artnet", {
@@ -326,6 +337,20 @@ export function ConfigPage() {
                         }
                         className="h-8 w-32"
                       />
+                      <Button
+                        size="sm"
+                        variant={o.ip === BROADCAST_IP ? "secondary" : "outline"}
+                        title="Send to every Art-Net node on the network (no IP needed)"
+                        onClick={() =>
+                          patch("artnet", {
+                            outputs: cfg.artnet.outputs.map((x, idx) =>
+                              idx === i ? { ...x, ip: BROADCAST_IP } : x
+                            ),
+                          })
+                        }
+                      >
+                        Broadcast
+                      </Button>
                       <Input
                         type="number"
                         placeholder="Port"
@@ -371,6 +396,13 @@ export function ConfigPage() {
                         <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
                     </div>
+                    {o.universes.length > 0 && (
+                      <div className="pl-1 text-[11px] text-muted-foreground">
+                        {o.universes.map((u) => `U${u} = ${portAddressLabel(u)}`).join("  ·  ")}
+                        {(!o.ip.trim() || o.ip === BROADCAST_IP) && "  —  broadcast to all nodes (no IP needed)"}
+                      </div>
+                    )}
+                    </div>
                   ))}
                   <Button
                     size="sm"
@@ -387,6 +419,12 @@ export function ConfigPage() {
                     <Plus className="h-4 w-4" /> Add node
                   </Button>
                 </div>
+              </div>
+              <div className="pt-3">
+                <ArtnetNetwork
+                  port={cfg.artnet.port}
+                  onAdd={(node: OutputNode) => patch("artnet", { outputs: [...cfg.artnet.outputs, node] })}
+                />
               </div>
             </Section>
 

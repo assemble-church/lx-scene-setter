@@ -3,8 +3,8 @@
 // shut down cleanly.
 
 const logger = require("./logger");
-const store = require("./store");
 const { loadConfig } = require("./config");
+const { openAppDb } = require("./db");
 const { createArtnetOutput, createArtnetInput } = require("./artnet");
 const { createOsc } = require("./osc");
 const { createEngine } = require("./engine");
@@ -18,6 +18,14 @@ try {
   process.exit(1);
 }
 
+let db;
+try {
+  db = openAppDb(config.appDb, { dataDir: config.dataDir, logger });
+} catch (err) {
+  logger.error(`Failed to open database ${config.appDb}:`, err.message);
+  process.exit(1);
+}
+
 const output = createArtnetOutput(config, logger);
 
 // engine and osc reference each other, so create osc with a late-bound handler.
@@ -27,15 +35,15 @@ const oscPort = createOsc(config, logger, (msg) => engine.handleOsc(msg));
 engine = createEngine({
   config,
   logger,
-  store,
+  db,
   output,
   sendOsc: oscPort.send,
   sendRaw: oscPort.sendRaw,
 });
 
-const artnetIn = createArtnetInput(config, logger, (u, p, l) => engine.onDmx(u, p, l));
+const artnetIn = createArtnetInput(config, logger, (u, p, l) => engine.onDmx(u, p, l), output);
 
-const api = createApi(config, logger, engine);
+const api = createApi(config, logger, engine, artnetIn);
 
 const stop = engine.start();
 
@@ -78,6 +86,11 @@ function shutdown(signal) {
   }
   try {
     api.close();
+  } catch (_) {
+    /* ignore */
+  }
+  try {
+    db.close();
   } catch (_) {
     /* ignore */
   }

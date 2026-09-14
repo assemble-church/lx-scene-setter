@@ -5,11 +5,12 @@ import { BeamMovingHead } from "./BeamMovingHead";
 import { WashMovingHead } from "./WashMovingHead";
 import { LedTape } from "./LedTape";
 import { FlatLedWash } from "./FlatLedWash";
+import { HotPower } from "./HotPower";
 
-export { ParCan, Chandelier, BeamMovingHead, WashMovingHead, LedTape, FlatLedWash };
+export { ParCan, Chandelier, BeamMovingHead, WashMovingHead, LedTape, FlatLedWash, HotPower };
 
 // Stable keys for storing a fixture's icon choice (e.g. in the patch).
-export type FixtureKind = "par" | "chandelier" | "beam" | "wash" | "led-tape" | "led-panel";
+export type FixtureKind = "par" | "chandelier" | "beam" | "wash" | "led-tape" | "led-panel" | "power";
 
 export const FIXTURE_ICONS: Record<FixtureKind, FC<SVGProps<SVGSVGElement>>> = {
   par: ParCan,
@@ -18,6 +19,7 @@ export const FIXTURE_ICONS: Record<FixtureKind, FC<SVGProps<SVGSVGElement>>> = {
   wash: WashMovingHead,
   "led-tape": LedTape,
   "led-panel": FlatLedWash,
+  power: HotPower,
 };
 
 // Ordered list with display labels, for pickers.
@@ -28,6 +30,7 @@ export const FIXTURE_KINDS: { key: FixtureKind; label: string }[] = [
   { key: "wash", label: "Wash Moving Head" },
   { key: "led-tape", label: "LED Tape" },
   { key: "led-panel", label: "LED Wash Panel" },
+  { key: "power", label: "Hot Power" },
 ];
 
 // Render an icon by kind. Colour it via `color`/`className` (uses currentColor).

@@ -162,6 +162,54 @@ export interface ConfigShape {
   dataDir: string;
 }
 
+// ---- Art-Net network ----
+
+// Universe numbers are 15-bit Art-Net Port-Addresses: net*256 + subnet*16 + universe.
+export function portAddress(u: number) {
+  return { net: (u >> 8) & 0x7f, subnet: (u >> 4) & 0x0f, universe: u & 0x0f };
+}
+export function portAddressLabel(u: number) {
+  const p = portAddress(u);
+  return `Net ${p.net} · Subnet ${p.subnet} · Universe ${p.universe}`;
+}
+export const BROADCAST_IP = "255.255.255.255";
+
+export interface ArtnetNode {
+  ip: string;
+  from: string; // address the reply came from (can differ from ip, e.g. behind NAT)
+  shortName: string;
+  longName: string;
+  report: string;
+  mac: string;
+  bindIndex: number;
+  outputs: number[]; // universes it outputs to DMX (i.e. receives from us)
+  inputs: number[];
+  lastSeen: number;
+}
+export interface ArtnetSender {
+  ip: string;
+  universes: number[];
+  packets: number;
+  isConsole: boolean;
+  lastSeen: number;
+}
+export interface ArtnetNetwork {
+  nodes: ArtnetNode[];
+  senders: ArtnetSender[];
+  interfaces: { name: string; address: string; netmask: string; broadcast: string }[];
+  polled?: string[];
+}
+
+export async function getArtnetNetwork(): Promise<ArtnetNetwork> {
+  const r = await fetch("/api/artnet/nodes");
+  if (!r.ok) throw new Error(`artnet nodes → ${r.status}`);
+  return r.json();
+}
+// Broadcasts ArtPoll and resolves ~3s later with everything that answered.
+export function discoverArtnet() {
+  return postJson<ArtnetNetwork>("/api/artnet/discover", {});
+}
+
 export async function getConfigForm(): Promise<ConfigShape> {
   const res = await fetch("/api/config/form");
   if (!res.ok) throw new Error(`GET /api/config/form → ${res.status}`);
@@ -188,6 +236,7 @@ export interface FixtureAttr {
   fade: boolean;
   offsets: number[];
   functions?: { name: string; min: number; max: number }[];
+  switch?: boolean; // on/off channel (non-dim / hot power) — from the patch, not the library
 }
 export interface FixtureMode {
   name: string;
@@ -207,7 +256,11 @@ export interface FixtureHit {
   name: string;
   short: string;
 }
-export type FixtureKind = "par" | "chandelier" | "beam" | "wash" | "led-tape" | "led-panel";
+export type FixtureKind = "par" | "chandelier" | "beam" | "wash" | "led-tape" | "led-panel" | "power";
+
+// level = normal channel (fades, or snaps if marked snap); switch = on/off only
+// (non-dim / hot power): output is always 0 or 255.
+export type ChannelType = "level" | "switch";
 
 // A "head" is one physical light within a patch entry (dimmer packs have many).
 export interface FixtureHead {
@@ -219,7 +272,7 @@ export interface FixtureHead {
 
 export interface PatchFixture {
   id: string;
-  libId: number;
+  libId: number | null; // null for built-in fixtures (e.g. a generic dimmer pack)
   manufacturer: string;
   name: string;
   label: string;
@@ -228,6 +281,8 @@ export interface PatchFixture {
   universe: number;
   address: number;
   fade: boolean[];
+  types: ChannelType[];
+  names: string[]; // per-channel name ("" = use the personality's)
   letters?: string[];
   icon?: FixtureKind; // used when the fixture is a single head
   heads?: FixtureHead[]; // present for multi-dimmers / dimmer packs
@@ -239,10 +294,23 @@ export async function searchFixtures(q: string): Promise<FixtureHit[]> {
   return (await r.json()).results;
 }
 
-export async function getFixture(id: number): Promise<Fixture> {
-  const r = await fetch(`/api/fixtures/${id}`);
-  if (!r.ok) throw new Error(`fixture ${id} → ${r.status}`);
-  return r.json();
+// Library fixtures don't change until a re-import, so cache the lookups (the
+// Fixtures page resolves the same personality for every patched instance).
+const fixtureCache = new Map<number, Promise<Fixture>>();
+export function getFixture(id: number): Promise<Fixture> {
+  let p = fixtureCache.get(id);
+  if (!p) {
+    p = fetch(`/api/fixtures/${id}`).then((r) => {
+      if (!r.ok) throw new Error(`fixture ${id} → ${r.status}`);
+      return r.json();
+    });
+    p.catch(() => fixtureCache.delete(id));
+    fixtureCache.set(id, p);
+  }
+  return p;
+}
+export function clearFixtureCache() {
+  fixtureCache.clear();
 }
 
 export async function getPatch(): Promise<{ fixtures: PatchFixture[] }> {
@@ -290,14 +358,16 @@ export function programmerSaveScene(opts: { sceneId?: string; label?: string }) 
   return postJson<{ ok: boolean; id: string }>("/api/programmer/save", opts);
 }
 
-export function patchAdd(body: {
-  libId: number;
-  mode: string;
-  universe: number;
-  address: number;
-  label?: string;
-  count?: number;
-}) {
+// Add from the library ({ libId, mode }) or a built-in dimmer pack
+// ({ builtin: "dimmer", channels, switched? } — the last `switched` channels are hot power).
+export function patchAdd(
+  body: ({ libId: number; mode: string } | { builtin: "dimmer"; channels: number; switched?: number }) & {
+    universe: number;
+    address: number;
+    label?: string;
+    count?: number;
+  }
+) {
   return postJson<{ fixtures: PatchFixture[]; added: number }>("/api/patch/add", body);
 }
 
@@ -308,6 +378,7 @@ export function patchUpdate(
     address: number;
     label: string;
     fade: boolean[];
+    channels: { type: ChannelType; fade: boolean; name: string }[];
     icon: FixtureKind;
     heads: FixtureHead[] | null; // null merges back to a single head
   }>
@@ -321,14 +392,20 @@ export async function patchDelete(id: string): Promise<void> {
 }
 
 // Upload the library .exe with upload-progress (parse progress comes via the WS
-// snapshot's fixtures.import). Resolves when the import completes.
-export function importLibraryUpload(file: File, onUpload: (pct: number) => void): Promise<unknown> {
+// snapshot's fixtures.import). `onUploaded` fires once the file has been sent and
+// the server is importing; the promise resolves when the import completes.
+export function importLibraryUpload(
+  file: File,
+  onUpload: (pct: number) => void,
+  onUploaded: () => void
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/fixtures/import");
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onUpload(Math.round((e.loaded / e.total) * 100));
     };
+    xhr.upload.onload = onUploaded;
     xhr.onload = () => {
       let body: { ok?: boolean; error?: string } = {};
       try {

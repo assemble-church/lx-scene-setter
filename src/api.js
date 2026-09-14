@@ -16,7 +16,8 @@ const { WebSocketServer } = require("ws");
 const store = require("./store");
 const { buildFromText, buildConfig, loadGrouped, serializeConfig } = require("./config");
 const lib = require("./fixtures/library");
-const { importLibrary, sevenZipStatus } = require("./fixtures/import");
+const { importLibraryInWorker, sevenZipStatus } = require("./fixtures/import");
+const { CHANNEL_TYPES } = require("./db");
 
 // Coerce the numeric fields of a grouped config object (the form sends some as
 // strings). Mutates and returns the object.
@@ -65,7 +66,7 @@ const MIME = {
   ".woff2": "font/woff2",
 };
 
-function createApi(config, logger, engine) {
+function createApi(config, logger, engine, artnetIn) {
   // Lazily-opened fixture library (only if a fixtures.db exists).
   let db = null;
   let libCount = 0;
@@ -75,12 +76,38 @@ function createApi(config, logger, engine) {
       try {
         db = lib.openLibrary(config.fixturesDb);
         libCount = lib.count(db);
+        relinkPatch(db);
       } catch (err) {
         logger.error("Open fixtures.db failed:", err.message);
       }
     }
     return db;
   }
+
+  // Library row ids change on every import (and differ between machines), so each
+  // time a library is opened, re-point patched fixtures at their personality by
+  // manufacturer + name + mode. Fixtures this library doesn't contain are unlinked
+  // (libId null) rather than left pointing at whatever now has their old id; their
+  // channels still work from the patch, and a later import that has them relinks.
+  function relinkPatch(l) {
+    const patch = engine.getPatch();
+    let changed = 0;
+    let missing = 0;
+    for (const fx of patch.fixtures) {
+      if (fx.libId == null && fx.manufacturer === "Generic" && fx.name === "Dimmer pack") continue; // built-in
+      const id = lib.findMatch(l, { manufacturer: fx.manufacturer, name: fx.name, mode: fx.mode, idHint: fx.libId });
+      if (id === null) missing++;
+      if (id !== fx.libId) {
+        fx.libId = id;
+        changed++;
+      }
+    }
+    if (changed) {
+      engine.setPatch(patch);
+      logger.info(`Fixture library: relinked ${changed} patched fixture(s)${missing ? `, ${missing} not in this library` : ""}`);
+    }
+  }
+
   library(); // open at startup if present
 
   let importState = { running: false, phase: null, done: 0, total: 0, error: null };
@@ -229,6 +256,18 @@ function createApi(config, logger, engine) {
       return;
     }
 
+    // ---- Art-Net network ----
+    // GET /api/artnet/nodes — discovered nodes, current ArtDMX senders, our interfaces.
+    if (url === "/api/artnet/nodes" && req.method === "GET") {
+      return sendJson(res, artnetIn.getNodes());
+    }
+    // POST /api/artnet/discover — broadcast ArtPoll, collect replies for ~3s, return them.
+    if (url === "/api/artnet/discover" && req.method === "POST") {
+      const targets = artnetIn.poll();
+      setTimeout(() => sendJson(res, { ...artnetIn.getNodes(), polled: targets }), 3000);
+      return;
+    }
+
     // ---- Fixture library ----
     if (url === "/api/fixtures/status" && req.method === "GET") {
       return sendJson(res, fixturesStatus());
@@ -260,6 +299,12 @@ function createApi(config, logger, engine) {
       const z = sevenZipStatus();
       if (!z.available) return badRequest(res, z.hint || "7-Zip not available");
       const tmpExe = path.join(os.tmpdir(), `fixlib-upload-${Date.now()}.exe`);
+      // Marked running from the start of the upload, so a second one can't begin mid-transfer.
+      importState = { running: true, phase: "uploading", done: 0, total: 0, error: null };
+      const failUpload = (message) => {
+        importState = { running: false, phase: "error", done: 0, total: 0, error: message };
+        fs.rmSync(tmpExe, { force: true });
+      };
       const out = fs.createWriteStream(tmpExe);
       req.pipe(out);
       req.on("error", () => {
@@ -268,9 +313,15 @@ function createApi(config, logger, engine) {
         } catch (_) {
           /* ignore */
         }
+        failUpload("Upload interrupted");
       });
-      out.on("error", (e) => badRequest(res, e.message));
+      req.on("aborted", () => failUpload("Upload interrupted"));
+      out.on("error", (e) => {
+        failUpload(e.message);
+        badRequest(res, e.message);
+      });
       out.on("finish", async () => {
+        if (req.aborted) return;
         importState = { running: true, phase: "starting", done: 0, total: 0, error: null };
         if (db) {
           try {
@@ -281,7 +332,7 @@ function createApi(config, logger, engine) {
           db = null;
         }
         try {
-          const result = await importLibrary(tmpExe, config.fixturesDb, (p) => {
+          const result = await importLibraryInWorker(tmpExe, config.fixturesDb, (p) => {
             importState = { running: true, phase: p.phase, done: p.done || 0, total: p.total || 0, error: null };
           });
           library();
@@ -336,21 +387,42 @@ function createApi(config, logger, engine) {
       });
     }
 
+    // POST /api/patch/add — either { libId, mode } from the fixture library, or
+    // { builtin: "dimmer", channels, switched? } for a generic dimmer pack (no library
+    // needed; the last `switched` channels are hot power). Both take
+    // { universe, address, label?, count? }.
     if (url === "/api/patch/add" && req.method === "POST") {
       return readBody(req, res, (b) => {
-        const l = library();
-        if (!l) return badRequest(res, "No fixture library imported");
-        const fx = lib.get(l, Number(b.libId));
-        if (!fx) return badRequest(res, "fixture not found", 404);
-        const mode = (fx.modes || []).find((m) => m.name === b.mode) || (fx.modes || [])[0];
-        if (!mode) return badRequest(res, "fixture has no modes");
-        const fade = lib.channelFade(mode);
-        const letters = lib.channelLetters(mode);
-        const channels = mode.channels || fade.length || 1;
-        const baseLabel = typeof b.label === "string" && b.label ? b.label : fx.name;
+        let template;
+        if (b.builtin === "dimmer") {
+          template = dimmerPackTemplate(b.channels, b.switched);
+          if (!template) return badRequest(res, `channels must be 1–${config.channels}, switched 0–channels`);
+        } else {
+          const l = library();
+          if (!l) return badRequest(res, "No fixture library imported");
+          const fx = lib.get(l, Number(b.libId));
+          if (!fx) return badRequest(res, "fixture not found", 404);
+          const mode = (fx.modes || []).find((m) => m.name === b.mode) || (fx.modes || [])[0];
+          if (!mode) return badRequest(res, "fixture has no modes");
+          const fade = lib.channelFade(mode);
+          const channels = mode.channels || fade.length || 1;
+          template = {
+            libId: fx.id,
+            manufacturer: fx.manufacturer,
+            name: fx.name,
+            mode: mode.name,
+            channels,
+            fade,
+            letters: lib.channelLetters(mode),
+            names: lib.channelNames(mode),
+            types: new Array(channels).fill("level"),
+            icon: guessIcon(fx),
+            heads: computeHeads(mode), // null unless it's a multi-dimmer
+          };
+        }
+        const { channels, heads } = template;
+        const baseLabel = typeof b.label === "string" && b.label ? b.label : template.name;
         const count = Math.max(1, Math.min(512, b.count | 0 || 1));
-        const icon = guessIcon(fx);
-        const heads = computeHeads(mode); // null unless it's a multi-dimmer
 
         if (channels > config.channels) return badRequest(res, "Fixture is larger than one universe");
 
@@ -365,18 +437,14 @@ function createApi(config, logger, engine) {
           }
           if (u >= config.universes) break; // out of universes
           patch.fixtures.push({
+            ...template,
             id: crypto.randomUUID(),
-            libId: fx.id,
-            manufacturer: fx.manufacturer,
-            name: fx.name,
             label: count > 1 ? `${baseLabel} ${i + 1}` : baseLabel,
-            mode: mode.name,
-            channels,
             universe: u,
             address: addr,
-            fade: [...fade], // own copy so per-channel overrides are independent
-            letters,
-            icon,
+            // own copies so per-channel overrides are independent
+            fade: [...template.fade],
+            types: [...template.types],
             heads: heads ? heads.map((h) => ({ ...h })) : undefined,
           });
           addr += channels;
@@ -398,6 +466,37 @@ function createApi(config, logger, engine) {
         if (b.address !== undefined) fx.address = Math.max(1, b.address | 0);
         if (typeof b.label === "string") fx.label = b.label;
         if (Array.isArray(b.fade)) fx.fade = b.fade.map((x) => x !== false);
+        // channels: [{ type, fade, name? }] per channel, in offset order.
+        if (Array.isArray(b.channels)) {
+          const bad = b.channels.findIndex((c) => c && c.type !== undefined && !CHANNEL_TYPES.includes(c.type));
+          if (bad >= 0) return badRequest(res, `channel ${bad + 1}: type must be one of ${CHANNEL_TYPES.join(", ")}`);
+          for (let i = 0; i < fx.channels; i++) {
+            const c = b.channels[i];
+            if (!c) continue;
+            const was = fx.types[i];
+            if (c.type) fx.types[i] = c.type;
+            if (typeof c.fade === "boolean") fx.fade[i] = c.fade;
+            if (typeof c.name === "string") fx.names[i] = c.name;
+            // Keep default names and a head's icon in step with the channel type
+            // (anything the user has customised is left alone).
+            const head = (fx.heads || []).find((h) => h.offset === i + 1 && h.span === 1);
+            if (was !== fx.types[i]) {
+              const toSwitch = fx.types[i] === "switch";
+              const [from, to] = toSwitch ? ["Dimmer", "Power"] : ["Power", "Dimmer"];
+              const renamed = (s) => (s === `${from} ${i + 1}` ? `${to} ${i + 1}` : s);
+              if (typeof c.name !== "string") fx.names[i] = renamed(fx.names[i]);
+              if (head) {
+                head.label = renamed(head.label);
+                if (toSwitch && head.icon === "par") head.icon = "power";
+                else if (!toSwitch && head.icon === "power") head.icon = "par";
+              }
+            }
+            if (was !== fx.types[i]) {
+              if (fx.types[i] === "switch") fx.letters[i] = "⏻";
+              else if (fx.letters[i] === "⏻") fx.letters[i] = "D";
+            }
+          }
+        }
         if (typeof b.icon === "string") fx.icon = b.icon;
         if (b.heads === null) fx.heads = undefined; // merge back to a single head
         else if (Array.isArray(b.heads)) {
@@ -456,6 +555,32 @@ function createApi(config, logger, engine) {
     if (/(tape|strip|pixel|batten|\bbar\b)/.test(s)) return "led-tape";
     if (/(panel|blinder|flood|matrix|\bpar\b|wash)/.test(s)) return /par/.test(s) ? "par" : "led-panel";
     return "par";
+  }
+
+  // A generic N-channel dimmer pack, split into one head per channel. The last
+  // `switched` channels are on/off hot power; the rest are dimmed. Any channel can
+  // be changed later in the patch's channel editor.
+  function dimmerPackTemplate(n, switched = 0) {
+    const channels = Number(n);
+    const nSwitched = Number(switched) || 0;
+    if (!Number.isInteger(channels) || channels < 1 || channels > config.channels) return null;
+    if (!Number.isInteger(nSwitched) || nSwitched < 0 || nSwitched > channels) return null;
+    const offsets = Array.from({ length: channels }, (_, i) => i + 1);
+    const isSwitch = (o) => o > channels - nSwitched;
+    const nameOf = (o) => `${isSwitch(o) ? "Power" : "Dimmer"} ${o}`;
+    return {
+      libId: null,
+      manufacturer: "Generic",
+      name: "Dimmer pack",
+      mode: `${channels} ch`,
+      channels,
+      fade: offsets.map((o) => !isSwitch(o)),
+      letters: offsets.map((o) => (isSwitch(o) ? "⏻" : "D")),
+      names: offsets.map(nameOf),
+      types: offsets.map((o) => (isSwitch(o) ? "switch" : "level")),
+      icon: "par",
+      heads: offsets.map((o) => ({ offset: o, span: 1, label: nameOf(o), icon: isSwitch(o) ? "power" : "par" })),
+    };
   }
 
   // If every channel of a mode is an independent single-channel dimmer (a dimmer

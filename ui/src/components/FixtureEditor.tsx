@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { getFixture, type PatchFixture, type FixtureMode, type FixtureAttr } from "@/lib/api";
+import type { PatchFixture, FixtureMode, FixtureAttr } from "@/lib/api";
+import { resolveMode } from "@/lib/fixture-mode";
 
 export type Update = { universe: number; channel: number; value: number };
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
@@ -144,6 +145,31 @@ function HSlider({ label, min, max, value, onChange, disabled }: { label: string
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// On/off control for a switch channel (non-dim / hot power). Sits in a column the
+// same height as a fader so it lines up in the raw channel bank.
+export function SwitchToggle({ label, on, onChange }: { label: string; on: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <div className="flex h-44 w-10 flex-col overflow-hidden rounded-lg border border-border/60">
+        <button
+          onClick={() => onChange(true)}
+          className={cn("flex-1 text-[10px] font-semibold transition-colors", on ? "bg-amber-500 text-black" : "bg-muted text-muted-foreground hover:bg-accent/60")}
+        >
+          ON
+        </button>
+        <button
+          onClick={() => onChange(false)}
+          className={cn("flex-1 border-t border-border/60 text-[10px] font-semibold transition-colors", !on ? "bg-secondary text-foreground" : "bg-muted text-muted-foreground hover:bg-accent/60")}
+        >
+          OFF
+        </button>
+      </div>
+      <div className="tabular-nums text-[10px] text-muted-foreground">{on ? "on" : "off"}</div>
+      <div className="w-12 text-center text-[10px] leading-tight" title={label}>{label}</div>
     </div>
   );
 }
@@ -385,14 +411,13 @@ export function FixtureEditor({
       return;
     }
     let alive = true;
-    getFixture(fx.libId).then((f) => {
-      if (!alive) return;
-      setMode(f.modes.find((m) => m.name === fx.mode) || f.modes[0] || null);
+    resolveMode(fx).then((m) => {
+      if (alive) setMode(m);
     });
     return () => {
       alive = false;
     };
-  }, [fx.libId, fx.mode, injectedMode]);
+  }, [fx, injectedMode]);
 
   if (!mode) return <div className="p-6 text-sm text-muted-foreground">Loading…</div>;
 
@@ -416,18 +441,22 @@ export function FixtureEditor({
     return true;
   });
   const isShutter = (a: FixtureAttr) => /shutter|strobe/i.test(a.name);
-  const find = (re: RegExp) => attrs.find((a) => !a.functions && re.test(a.name.toLowerCase()));
+  // Continuous (fader-style) attributes — not discrete slots, not on/off switches.
+  const cont = attrs.filter((a) => !a.functions && !a.switch);
+  const find = (re: RegExp) => cont.find((a) => re.test(a.name.toLowerCase()));
 
   const rA = find(/red/), gA = find(/green/), bA = find(/blue/);
   const hasMix = rA && gA && bA;
-  const panA = attrs.find((a) => !a.functions && /pan/i.test(a.name));
-  const tiltA = attrs.find((a) => !a.functions && /tilt/i.test(a.name));
+  const panA = cont.find((a) => /pan/i.test(a.name));
+  const tiltA = cont.find((a) => /tilt/i.test(a.name));
 
-  const intensity = attrs.filter((a) => !a.functions && !isShutter(a) && (a.group === "I" || /dim|intensit|master/i.test(a.name)));
-  const extraColour = attrs.filter((a) => !a.functions && a.group === "C" && a !== rA && a !== gA && a !== bA);
+  const switches = attrs.filter((a) => a.switch);
+  const intensity = cont.filter((a) => !isShutter(a) && (a.group === "I" || /dim|intensit|master/i.test(a.name)));
+  const extraColour = cont.filter((a) => a.group === "C" && a !== rA && a !== gA && a !== bA);
   const slots = attrs.filter((a) => a.functions?.length);
   const handled = new Set<FixtureAttr>([...intensity, ...slots, ...extraColour, rA, gA, bA, panA, tiltA].filter(Boolean) as FixtureAttr[]);
-  const others = attrs.filter((a) => !a.functions && !handled.has(a));
+  const others = cont.filter((a) => !handled.has(a));
+  const switchAt = new Set(switches.map((a) => a.offsets[0]));
 
   // Label for a single DMX channel (by 1-based offset) — what that channel does.
   const labelFor = (offset: number) => {
@@ -501,6 +530,14 @@ export function FixtureEditor({
           </Panel>
         )}
 
+        {switches.length > 0 && (
+          <Panel title="Power">
+            {switches.map((a) => (
+              <SwitchToggle key={a.id} label={a.name} on={v(a.offsets[0]) >= 128} onChange={(on) => setOne(a.offsets[0], on ? 255 : 0)} />
+            ))}
+          </Panel>
+        )}
+
         {(hasMix || extraColour.length > 0) && (
           <Panel title="Colour">
             {hasMix && (
@@ -561,7 +598,11 @@ export function FixtureEditor({
             return (
               <div key={offset} className="flex flex-col items-center gap-1">
                 <span className="text-[9px] tabular-nums text-muted-foreground">ch {ch(offset)}</span>
-                <VFader label={labelFor(offset)} value={v(offset)} max={255} onChange={(val) => setOne(offset, val)} />
+                {switchAt.has(offset) ? (
+                  <SwitchToggle label={labelFor(offset)} on={v(offset) >= 128} onChange={(on) => setOne(offset, on ? 255 : 0)} />
+                ) : (
+                  <VFader label={labelFor(offset)} value={v(offset)} max={255} onChange={(val) => setOne(offset, val)} />
+                )}
               </div>
             );
           })}
@@ -572,8 +613,8 @@ export function FixtureEditor({
 }
 
 
-// Locate / Home — put a fixture into a known, visible state: intensity full,
-// pan/tilt centred, shutter open, open white (RGB full / colour-wheel open /
+// Locate / Home — put a fixture into a known, visible state: power on, intensity
+// full, pan/tilt centred, shutter open, open white (RGB full / colour-wheel open /
 // CMY at 0), everything else home. Returns the channel updates to apply.
 export function locateUpdates(fx: PatchFixture, mode: FixtureMode): Update[] {
   const ups: Update[] = [];
@@ -604,7 +645,9 @@ export function locateUpdates(fx: PatchFixture, mode: FixtureMode): Update[] {
       setDeclared(f ? (Math.min(f.min, f.max) + Math.max(f.min, f.max)) / 2 : 0);
     };
     const n = a.name.toLowerCase();
-    if (/shutter|strobe/.test(n)) {
+    if (a.switch) {
+      setDeclared(255); // power on, or nothing it feeds will light
+    } else if (/shutter|strobe/.test(n)) {
       if (a.functions?.some((x) => /open/i.test(x.name))) openSlot();
       else setDeclared(declMax); // no named "open" → full usually opens it
     } else if (/pan|tilt/.test(n)) {

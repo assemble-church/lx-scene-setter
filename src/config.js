@@ -76,7 +76,7 @@ const FILE_DEFAULTS = {
     feedbackHeartbeatMs: 5000, // re-broadcast OSC feedback this often so Companion stays in sync
   },
 
-  dataDir: "./data", // where scenes.json / state.json live
+  dataDir: "./data", // where the databases (scene-setter.db, fixtures.db) live
 };
 
 // Strip // line and /* */ block comments, leaving string contents intact.
@@ -180,10 +180,7 @@ function buildConfig(fileConfig) {
   config.dataDir = path.isAbsolute(config.dataDir)
     ? config.dataDir
     : path.join(ROOT, config.dataDir);
-  config.scenesFile = path.join(config.dataDir, "scenes.json");
-  config.stateFile = path.join(config.dataDir, "state.json");
-  config.patchFile = path.join(config.dataDir, "patch.json");
-  config.fixtureMapFile = path.join(config.dataDir, "fixture-map.json");
+  config.appDb = path.join(config.dataDir, "scene-setter.db");
   config.fixturesDb = path.join(config.dataDir, "fixtures.db");
   config.configPath = CONFIG_PATH;
 

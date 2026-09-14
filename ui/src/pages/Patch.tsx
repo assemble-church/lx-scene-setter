@@ -31,15 +31,20 @@ import {
   patchUpdate,
   patchDelete,
   importLibraryUpload,
+  clearFixtureCache,
   type FixtureHit,
   type Fixture,
   type PatchFixture,
   type FixtureKind,
   type FixtureHead,
+  type ChannelType,
 } from "@/lib/api";
 
-function snapChannels(fade: boolean[]) {
-  return fade.map((f, i) => (f ? null : i + 1)).filter((x): x is number => x !== null);
+// "2 switch, 1 snap" — non-default channel behaviour, for the patch table.
+function channelSummary(fx: PatchFixture) {
+  const switches = fx.types?.filter((t) => t === "switch").length ?? 0;
+  const snaps = fx.fade.filter((f, i) => !f && fx.types?.[i] !== "switch").length;
+  return [switches && `${switches} switch`, snaps && `${snaps} snap`].filter(Boolean).join(", ");
 }
 
 // Lowest start address in `universe` with `channels` consecutive free channels.
@@ -79,7 +84,8 @@ function LibraryBar({ onImported }: { onImported: () => void }) {
     setUploading(true);
     setUploadPct(0);
     try {
-      await importLibraryUpload(file, setUploadPct);
+      // Once the file is sent, show the server's extract/parse progress instead.
+      await importLibraryUpload(file, setUploadPct, () => setUploading(false));
       onImported();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -105,11 +111,13 @@ function LibraryBar({ onImported }: { onImported: () => void }) {
           <div className="text-sm text-muted-foreground">
             {uploading
               ? `Uploading… ${uploadPct}%`
-              : imp?.phase === "extracting"
-                ? "Extracting…"
-                : imp?.total
-                  ? `Parsing ${imp.done.toLocaleString()} / ${imp.total.toLocaleString()}`
-                  : "Importing…"}
+              : imp?.phase === "uploading"
+                ? "Receiving upload…"
+                : imp?.phase === "extracting"
+                  ? "Extracting personalities…"
+                  : imp?.total
+                    ? `Parsing ${imp.done.toLocaleString()} / ${imp.total.toLocaleString()}`
+                    : "Importing…"}
           </div>
         ) : !fx?.sevenZip ? (
           <Badge variant="warning">{fx?.sevenZipHint || "7-Zip required to import"}</Badge>
@@ -285,8 +293,145 @@ function AddDialog({
   );
 }
 
-// ── Per-channel snap/fade editor ───────────────────────────────────────────
-function SnapDialog({
+// ── Add a built-in dimmer pack (no library needed) ─────────────────────────
+function AddDimmerDialog({
+  open,
+  onClose,
+  onAdded,
+  universes,
+  patch,
+  total,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onAdded: () => void;
+  universes: number;
+  patch: PatchFixture[];
+  total: number;
+}) {
+  const [channels, setChannels] = useState(12);
+  const [switched, setSwitched] = useState(0);
+  const [label, setLabel] = useState("Dimmer pack");
+  const [universe, setUniverse] = useState(0);
+  const [address, setAddress] = useState(1);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) setAddress(nextFreeAddress(patch, universe, channels, total));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, universe, channels, total]);
+
+  const dimmed = Math.max(0, channels - switched);
+
+  async function add() {
+    setBusy(true);
+    setError(null);
+    try {
+      await patchAdd({ builtin: "dimmer", channels, switched, universe, address, label });
+      onAdded();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Add dimmer pack</DialogTitle>
+          <DialogDescription>
+            A generic multi-channel dimmer, one head per channel. Switched channels (non-dim / hot power) are
+            only ever fully on or off — change any channel later under <b>Channels</b>.
+          </DialogDescription>
+        </DialogHeader>
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        <div className="space-y-3">
+          <label className="block text-sm">
+            Label
+            <Input className="mt-1" value={label} onChange={(e) => setLabel(e.target.value)} />
+          </label>
+          <div className="flex flex-wrap gap-3">
+            <label className="text-sm">
+              Channels
+              <Input
+                type="number"
+                className="mt-1 w-24"
+                value={channels}
+                min={1}
+                max={total}
+                onChange={(e) => {
+                  const n = Math.max(1, Math.min(total, Number(e.target.value) || 1));
+                  setChannels(n);
+                  setSwitched((s) => Math.min(s, n));
+                }}
+              />
+            </label>
+            <label className="text-sm">
+              Switched (last)
+              <Input
+                type="number"
+                className="mt-1 w-24"
+                value={switched}
+                min={0}
+                max={channels}
+                onChange={(e) => setSwitched(Math.max(0, Math.min(channels, Number(e.target.value) || 0)))}
+              />
+            </label>
+            <label className="text-sm">
+              Universe
+              <Input
+                type="number"
+                className="mt-1 w-24"
+                value={universe}
+                min={0}
+                max={universes - 1}
+                onChange={(e) => setUniverse(Number(e.target.value))}
+              />
+            </label>
+            <label className="text-sm">
+              Address
+              <Input
+                type="number"
+                className="mt-1 w-24"
+                value={address}
+                min={1}
+                max={total}
+                onChange={(e) => setAddress(Number(e.target.value))}
+              />
+            </label>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            U{universe}/{address}–{address + channels - 1}:{" "}
+            {dimmed > 0 && `ch ${address}–${address + dimmed - 1} dimmed`}
+            {dimmed > 0 && switched > 0 && ", "}
+            {switched > 0 && `ch ${address + dimmed}–${address + channels - 1} switched`}
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={add} disabled={busy}>
+            Add
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Per-channel type + snap/fade editor ─────────────────────────────────────
+interface ChannelRow {
+  type: ChannelType;
+  fade: boolean;
+  name: string;
+}
+
+function ChannelsDialog({
   entry,
   onClose,
   onSaved,
@@ -295,29 +440,50 @@ function SnapDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [fade, setFade] = useState<boolean[]>([]);
-  const [labels, setLabels] = useState<string[]>([]);
+  const [rows, setRows] = useState<ChannelRow[]>([]);
+  const [placeholders, setPlaceholders] = useState<string[]>([]); // personality names
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!entry) return;
-    setFade([...entry.fade]);
-    setLabels([]);
+    setRows(
+      Array.from({ length: entry.channels }, (_, i) => ({
+        type: entry.types?.[i] ?? "level",
+        fade: entry.fade[i] !== false,
+        name: entry.names?.[i] ?? "",
+      }))
+    );
+    setPlaceholders([]);
+    if (entry.libId == null) return;
     getFixture(entry.libId)
       .then((f) => {
         const m = f.modes.find((x) => x.name === entry.mode);
         const names: string[] = new Array(entry.channels).fill("");
-        for (const a of m?.attrs ?? []) for (const off of a.offsets) if (off >= 1 && off <= names.length) names[off - 1] = a.name;
-        setLabels(names);
+        for (const a of m?.attrs ?? []) for (const off of a.offsets) if (off >= 1 && off <= names.length) names[off - 1] ||= a.name;
+        setPlaceholders(names);
       })
       .catch(() => {});
   }, [entry]);
+
+  const update = (i: number, patch: Partial<ChannelRow>) =>
+    setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+
+  // Switching type: switches never fade; keep default "Dimmer n"/"Power n" names in step.
+  function setType(i: number, type: ChannelType) {
+    const r = rows[i];
+    const [from, to] = type === "switch" ? ["Dimmer", "Power"] : ["Power", "Dimmer"];
+    update(i, {
+      type,
+      fade: type === "switch" ? false : true,
+      name: r.name === `${from} ${i + 1}` ? `${to} ${i + 1}` : r.name,
+    });
+  }
 
   async function save() {
     if (!entry) return;
     setBusy(true);
     try {
-      await patchUpdate(entry.id, { fade });
+      await patchUpdate(entry.id, { channels: rows });
       onSaved();
       onClose();
     } finally {
@@ -331,23 +497,51 @@ function SnapDialog({
         <DialogHeader>
           <DialogTitle>Channels — {entry?.label}</DialogTitle>
           <DialogDescription>
-            Toggle each channel between <b>fade</b> (ramps with the crossfade) and <b>snap</b> (jumps
-            instantly — shutters, control, etc.). Defaults come from the personality.
+            <b>Level</b> channels ramp with crossfades, or <b>snap</b> instantly (shutters, control…).{" "}
+            <b>Switch</b> channels are on/off only — non-dim loads and hot power: on as soon as a scene
+            starts, off only once it has fully faded out.
           </DialogDescription>
         </DialogHeader>
         <div className="max-h-96 space-y-1 overflow-auto">
-          {fade.map((f, i) => (
-            <button
-              key={i}
-              onClick={() => setFade((prev) => prev.map((v, idx) => (idx === i ? !v : v)))}
-              className="flex w-full items-center justify-between rounded border border-border/50 px-3 py-1.5 text-left text-sm hover:bg-accent/40"
-            >
-              <span>
-                <span className="tabular-nums text-muted-foreground">Ch {i + 1}</span>
-                {labels[i] ? <span className="ml-2">{labels[i]}</span> : null}
+          {rows.map((r, i) => (
+            <div key={i} className="flex items-center gap-3 rounded border border-border/50 px-3 py-1.5 text-sm">
+              <span className="w-14 shrink-0 tabular-nums text-muted-foreground">
+                Ch {i + 1}
+                {entry && <span className="block text-[10px]">DMX {entry.address + i}</span>}
               </span>
-              <Badge variant={f ? "secondary" : "warning"}>{f ? "fade" : "snap"}</Badge>
-            </button>
+              <Input
+                className="h-8 flex-1"
+                value={r.name}
+                placeholder={placeholders[i] || `Channel ${i + 1}`}
+                onChange={(e) => update(i, { name: e.target.value })}
+              />
+              <div className="flex overflow-hidden rounded-md border border-border/60">
+                {(["level", "switch"] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setType(i, t)}
+                    className={cn(
+                      "px-2.5 py-1 text-xs capitalize",
+                      r.type === t
+                        ? t === "switch"
+                          ? "bg-amber-500 text-black"
+                          : "bg-secondary text-foreground"
+                        : "text-muted-foreground hover:bg-accent/40"
+                    )}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+              <button
+                disabled={r.type === "switch"}
+                onClick={() => update(i, { fade: !r.fade })}
+                title={r.type === "switch" ? "Switch channels never fade" : "Toggle fade / snap"}
+                className="disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Badge variant={r.fade ? "secondary" : "warning"}>{r.fade ? "fade" : "snap"}</Badge>
+              </button>
+            </div>
           ))}
         </div>
         <DialogFooter>
@@ -414,8 +608,8 @@ function IconsDialog({
       Array.from({ length: entry?.channels ?? 1 }, (_, i) => ({
         offset: i + 1,
         span: 1,
-        label: `Head ${i + 1}`,
-        icon,
+        label: entry?.names?.[i] || `Head ${i + 1}`,
+        icon: entry?.types?.[i] === "switch" ? "power" : icon,
       }))
     );
 
@@ -496,8 +690,9 @@ export function Patch() {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<FixtureHit[]>([]);
   const [adding, setAdding] = useState<FixtureHit | null>(null);
-  const [snapEdit, setSnapEdit] = useState<PatchFixture | null>(null);
+  const [channelEdit, setChannelEdit] = useState<PatchFixture | null>(null);
   const [iconEdit, setIconEdit] = useState<PatchFixture | null>(null);
+  const [addingDimmer, setAddingDimmer] = useState(false);
 
   const refresh = () => getPatch().then((p) => setPatch(p.fixtures)).catch(() => {});
   useEffect(() => {
@@ -517,7 +712,7 @@ export function Patch() {
     }
   }
 
-  async function commitField(id: string, body: Partial<PatchFixture>) {
+  async function commitField(id: string, body: Partial<Pick<PatchFixture, "label" | "universe" | "address">>) {
     const p = await patchUpdate(id, body);
     setPatch(p.fixtures);
   }
@@ -531,12 +726,20 @@ export function Patch() {
     <div className="space-y-4">
       <h1 className="text-2xl font-semibold tracking-tight">Patch &amp; Personalities</h1>
 
-      <LibraryBar onImported={refresh} />
+      <LibraryBar
+        onImported={() => {
+          clearFixtureCache();
+          refresh();
+        }}
+      />
 
       {/* Search + add */}
       <Card>
-        <CardContent className="p-4">
-          <div className="relative">
+        <CardContent className="flex items-start gap-3 p-4">
+          <Button variant="outline" onClick={() => setAddingDimmer(true)}>
+            <Plus className="h-4 w-4" /> Dimmer pack
+          </Button>
+          <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
               className="pl-8"
@@ -655,13 +858,11 @@ export function Patch() {
                     </td>
                     <td className="px-4 py-2 text-muted-foreground">
                       {fx.channels}
-                      {snapChannels(fx.fade).length > 0 && (
-                        <span className="ml-2 text-xs">({snapChannels(fx.fade).length} snap)</span>
-                      )}
+                      {channelSummary(fx) && <span className="ml-2 text-xs">({channelSummary(fx)})</span>}
                     </td>
                     <td className="px-4 py-2">
                       <div className="flex justify-end gap-2">
-                        <Button size="sm" variant="outline" onClick={() => setSnapEdit(fx)}>
+                        <Button size="sm" variant="outline" onClick={() => setChannelEdit(fx)}>
                           Channels
                         </Button>
                         <Button size="sm" variant="ghost" onClick={() => remove(fx.id)}>
@@ -675,7 +876,7 @@ export function Patch() {
             </table>
           ) : (
             <p className="p-6 text-sm text-muted-foreground">
-              No fixtures patched yet. Import a library, search above, and add fixtures.
+              No fixtures patched yet. Add a dimmer pack, or import a library and search above.
             </p>
           )}
         </CardContent>
@@ -689,7 +890,15 @@ export function Patch() {
         onClose={() => setAdding(null)}
         onAdded={refresh}
       />
-      <SnapDialog entry={snapEdit} onClose={() => setSnapEdit(null)} onSaved={refresh} />
+      <AddDimmerDialog
+        open={addingDimmer}
+        universes={universes}
+        patch={patch}
+        total={channels}
+        onClose={() => setAddingDimmer(false)}
+        onAdded={refresh}
+      />
+      <ChannelsDialog entry={channelEdit} onClose={() => setChannelEdit(null)} onSaved={refresh} />
       <IconsDialog entry={iconEdit} onClose={() => setIconEdit(null)} onSaved={refresh} />
     </div>
   );

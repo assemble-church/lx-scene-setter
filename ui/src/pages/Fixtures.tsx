@@ -15,7 +15,6 @@ import { FixtureEditor, locateUpdates, nameToHex, type Update } from "@/componen
 import { useEngine } from "@/lib/useEngine";
 import {
   getPatch,
-  getFixture,
   getFixtureMap,
   setFixtureMap,
   programmerSet,
@@ -23,9 +22,11 @@ import {
   programmerSaveScene,
   type PatchFixture,
   type FixtureKind,
-  type Fixture,
   type FixtureMode,
 } from "@/lib/api";
+import { resolveMode } from "@/lib/fixture-mode";
+
+const POWER_ON_COLOUR = "#ffb300";
 
 // How to read a fixture's colour + intensity from live DMX (offsets are 1-based).
 interface FixDesc {
@@ -34,9 +35,8 @@ interface FixDesc {
   wheel: { off: number; size: number; fns: { name: string; min: number; max: number }[] } | null;
 }
 
-function buildDesc(f: Fixture, modeName: string): FixDesc {
-  const mode = f.modes.find((m) => m.name === modeName) || f.modes[0];
-  const attrs = (mode?.attrs || []).filter((a) => a.offsets?.length);
+function buildDesc(mode: FixtureMode): FixDesc {
+  const attrs = mode.attrs.filter((a) => a.offsets?.length && !a.switch);
   const find = (re: RegExp) => attrs.find((a) => !a.functions && re.test(a.name.toLowerCase()));
   const dim = attrs.find((a) => !a.functions && a.group === "I" && !/shutter|strobe/.test(a.name.toLowerCase()));
   const r = find(/red/), g = find(/green/), b = find(/blue/);
@@ -70,6 +70,7 @@ interface GridItem {
   universe: number;
   address: number;
   channels: number;
+  switch?: boolean; // a head on a switched (hot power) channel
 }
 
 function enumerateItems(fixtures: PatchFixture[]): GridItem[] {
@@ -85,6 +86,7 @@ function enumerateItems(fixtures: PatchFixture[]): GridItem[] {
           universe: fx.universe,
           address: fx.address + h.offset - 1,
           channels: h.span,
+          switch: h.span === 1 && fx.types?.[h.offset - 1] === "switch",
         });
       }
     } else {
@@ -104,8 +106,9 @@ function enumerateItems(fixtures: PatchFixture[]): GridItem[] {
 
 // Canonical attribute role so one control drives the same *kind* of channel
 // across fixture types (e.g. "dim" covers Dimmer, Dimmer 1..6, Master).
-function roleOf(a: { name: string; group: string; functions?: unknown[] }): string {
+function roleOf(a: { name: string; group: string; functions?: unknown[]; switch?: boolean }): string {
   const n = a.name.toLowerCase();
+  if (a.switch) return "switch"; // never shares a control with dimmers
   if (/shutter|strobe/.test(n)) return "shutter";
   if (/\bpan\b/.test(n)) return "pan";
   if (/\btilt\b/.test(n)) return "tilt";
@@ -146,12 +149,15 @@ interface Target {
   byRole: Map<string, MAttr[]>;
 }
 
-// A single dimmer channel presented as a standalone fixture (a dimmer-pack head).
-const HEAD_MODE: FixtureMode = {
-  name: "Head",
-  channels: 1,
-  attrs: [{ id: "dim", name: "Dimmer", group: "I", size: 1, fade: true, offsets: [1] }],
-};
+// A single dimmer / switched channel presented as a standalone fixture (a dimmer-pack head).
+const DIM_ATTR = { id: "dim", name: "Dimmer", group: "I", size: 1, fade: true, offsets: [1] };
+const POWER_ATTR = { id: "power", name: "Power", group: "S", size: 1, fade: false, offsets: [1], switch: true };
+const HEAD_MODE: FixtureMode = { name: "Head", channels: 1, attrs: [DIM_ATTR] };
+const SWITCH_HEAD_MODE: FixtureMode = { name: "Head", channels: 1, attrs: [POWER_ATTR] };
+// Selections mixing dimmer and hot-power heads get a virtual fixture with one of
+// each control; it lives on universe -1, which is never sent to the engine.
+const MIXED_HEADS_MODE: FixtureMode = { name: "Heads", channels: 2, attrs: [DIM_ATTR, { ...POWER_ATTR, offsets: [2] }] };
+const VIRTUAL_UNIVERSE = -1;
 
 const colourDist = (a: [number, number, number], b: [number, number, number]) =>
   (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
@@ -170,9 +176,20 @@ function SelectionEditor({ items, patch, channels }: { items: GridItem[]; patch:
 
   function flush() {
     timer.current = null;
-    const ups = Object.values(pending.current);
+    const ups = Object.values(pending.current).filter((x) => x.universe !== VIRTUAL_UNIVERSE);
     pending.current = {};
     if (ups.length) programmerSet(ups);
+  }
+  // Seed a virtual mixed-heads fixture from the first real dimmer and power head.
+  function seedVirtual() {
+    const info = infoRef.current;
+    if (!info || info.rep.universe !== VIRTUAL_UNIVERSE) return;
+    const first = (role: string) => info.all.find((t) => t.byRole.has(role));
+    const row = (valuesRef.current[VIRTUAL_UNIVERSE] = new Array(channels).fill(0));
+    const d = first("dim");
+    const s = first("switch");
+    if (d) row[0] = valuesRef.current[d.universe]?.[d.address - 1] ?? 0;
+    if (s) row[1] = valuesRef.current[s.universe]?.[s.address - 1] ?? 0;
   }
   function baseSet(ups: Update[]) {
     for (const x of ups) {
@@ -282,12 +299,28 @@ function SelectionEditor({ items, patch, channels }: { items: GridItem[]; patch:
         const fx = patch.find((f) => f.id === it.fixtureId);
         if (!fx) return null;
         if (it.key.includes("#")) {
-          const synth: PatchFixture = { ...fx, id: it.key, label: it.label, address: it.address, channels: it.channels || 1 };
-          const attrs: MAttr[] = [{ name: "Dimmer", offsets: [1], size: 1, role: "dim" }];
-          return { fx: synth, mode: HEAD_MODE, address: it.address, universe: it.universe, attrs, byRole: new Map([["dim", attrs]]) };
+          const role = it.switch ? "switch" : "dim";
+          const synth: PatchFixture = {
+            ...fx,
+            id: it.key,
+            label: it.label,
+            address: it.address,
+            channels: 1,
+            fade: [!it.switch],
+            types: [it.switch ? "switch" : "level"],
+            names: [it.label],
+          };
+          const attrs: MAttr[] = [{ name: it.switch ? "Power" : "Dimmer", offsets: [1], size: 1, role }];
+          return {
+            fx: synth,
+            mode: it.switch ? SWITCH_HEAD_MODE : HEAD_MODE,
+            address: it.address,
+            universe: it.universe,
+            attrs,
+            byRole: new Map([[role, attrs]]),
+          };
         }
-        const f = await getFixture(fx.libId).catch(() => null);
-        const m = f?.modes.find((x) => x.name === fx.mode) || f?.modes[0];
+        const m = await resolveMode(fx);
         if (!m) return null;
         const seen = new Set<string>();
         const attrs: MAttr[] = (m.attrs || [])
@@ -305,12 +338,44 @@ function SelectionEditor({ items, patch, channels }: { items: GridItem[]; patch:
           arr.push(a);
           byRole.set(a.role, arr);
         }
-        return { fx, address: fx.address, universe: fx.universe, attrs, byRole };
+        return { fx, mode: m, address: fx.address, universe: fx.universe, attrs, byRole };
       })
     ).then((rs) => {
       if (!alive) return;
       const all = rs.filter(Boolean) as Target[];
       if (!all.length) return;
+      // Only dimmer + hot-power heads selected, with both kinds present → a
+      // virtual fixture offering one Dimmer and one Power control.
+      const headsOnly = items.every((it) => it.key.includes("#"));
+      if (all.length > 1 && headsOnly && all.some((t) => t.byRole.has("dim")) && all.some((t) => t.byRole.has("switch"))) {
+        const vAttrs: MAttr[] = [
+          { name: "Dimmer", offsets: [1], size: 1, role: "dim" },
+          { name: "Power", offsets: [2], size: 1, role: "switch" },
+        ];
+        const vfx: PatchFixture = {
+          ...all[0].fx,
+          id: "__selection__",
+          label: `${all.length} heads`,
+          universe: VIRTUAL_UNIVERSE,
+          address: 1,
+          channels: 2,
+          fade: [true, false],
+          types: ["level", "switch"],
+          names: ["Dimmer", "Power"],
+        };
+        const rep: Target = {
+          fx: vfx,
+          mode: MIXED_HEADS_MODE,
+          address: 1,
+          universe: VIRTUAL_UNIVERSE,
+          attrs: vAttrs,
+          byRole: new Map(vAttrs.map((a) => [a.role, [a]])),
+        };
+        infoRef.current = { rep, all };
+        seedVirtual();
+        setReady(true);
+        return;
+      }
       const hasWheel = all.some((t) => t.byRole.has("colourwheel"));
       const hasRGB = all.some((t) => t.byRole.has("red") && t.byRole.has("green") && t.byRole.has("blue"));
       const cands = hasWheel && hasRGB ? all.filter((t) => t.byRole.has("colourwheel")) : all;
@@ -321,6 +386,7 @@ function SelectionEditor({ items, patch, channels }: { items: GridItem[]; patch:
     return () => {
       alive = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, patch]);
 
   // Seed from live output.
@@ -334,6 +400,7 @@ function SelectionEditor({ items, patch, channels }: { items: GridItem[]; patch:
       const vals: Record<number, number[]> = {};
       for (let u = 0; u < U; u++) vals[u] = Array.from(b.subarray(u * channels, (u + 1) * channels));
       valuesRef.current = vals;
+      seedVirtual();
       setTick((n) => n + 1);
       ws.close();
     };
@@ -347,6 +414,7 @@ function SelectionEditor({ items, patch, channels }: { items: GridItem[]; patch:
       if (timer.current) clearTimeout(timer.current);
       flush();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channels]);
 
   if (!ready || !infoRef.current) return <div className="p-6 text-sm text-muted-foreground">Loading…</div>;
@@ -450,27 +518,15 @@ export function Fixtures() {
     return m;
   }, [items, cells]);
 
-  // Build colour/intensity descriptors for the patched fixtures' personalities.
+  // Build colour/intensity descriptors per patched fixture (its personality with
+  // the patch's channel types applied; library lookups are cached).
   useEffect(() => {
     if (!fixtures.length) return setDesc({});
     let alive = true;
-    const uniq = new Map<string, PatchFixture>();
-    for (const fx of fixtures) uniq.set(`${fx.libId}:${fx.mode}`, fx);
-    Promise.all(
-      [...uniq.values()].map((fx) =>
-        getFixture(fx.libId)
-          .then((f) => ({ key: `${fx.libId}:${fx.mode}`, d: buildDesc(f, fx.mode) }))
-          .catch(() => null)
-      )
-    ).then((rs) => {
+    Promise.all(fixtures.map((fx) => resolveMode(fx).then((m) => (m ? ([fx.id, buildDesc(m)] as const) : null)))).then((rs) => {
       if (!alive) return;
-      const byMode: Record<string, FixDesc> = {};
-      for (const r of rs) if (r) byMode[r.key] = r.d;
       const out: Record<string, FixDesc> = {};
-      for (const fx of fixtures) {
-        const d = byMode[`${fx.libId}:${fx.mode}`];
-        if (d) out[fx.id] = d;
-      }
+      for (const r of rs) if (r) out[r[0]] = r[1];
       setDesc(out);
     });
     return () => {
@@ -502,6 +558,7 @@ export function Fixtures() {
   function itemColour(it: GridItem): string {
     const row = dmxRef.current[it.universe];
     if (!row) return "#3a3f4a";
+    if (it.switch) return (row[it.address - 1] ?? 0) >= 128 ? POWER_ON_COLOUR : mixColour(0, 0, 0, 0);
     const at = (off: number) => row[it.address + off - 2] ?? 0; // (address+off-1) - 1
     const d = it.key.includes("#") ? null : desc[it.fixtureId];
     let i = 1;
@@ -601,8 +658,7 @@ export function Fixtures() {
   async function locate(fixtureId: string) {
     const fx = fixtures.find((f) => f.id === fixtureId);
     if (!fx) return;
-    const f = await getFixture(fx.libId).catch(() => null);
-    const mode = f?.modes.find((m) => m.name === fx.mode) || f?.modes[0];
+    const mode = await resolveMode(fx);
     if (!mode) return;
     programmerSet(locateUpdates(fx, mode));
   }
@@ -711,6 +767,7 @@ export function Fixtures() {
               )}
               {fx && <div className="truncate text-muted-foreground">Mode: {fx.mode}</div>}
               {isHead && fx && <div className="truncate text-muted-foreground">Head of “{fx.label}”</div>}
+              {it.switch && <div className="truncate text-amber-500">Switched (hot power) — on/off only</div>}
               <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5">
                 <span className="text-muted-foreground">Universe</span>
                 <span className="text-right tabular-nums">{it.universe}</span>

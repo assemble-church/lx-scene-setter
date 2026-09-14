@@ -1,9 +1,16 @@
 // Art-Net I/O.
 //
-// Output: builds and sends ArtDMX packets to configured nodes.
-// Input:  listens for ArtDMX from the console console (to record), and answers
-//         ArtPoll discovery with ArtPollReply so controllers/tools can find us
-//         and a unicasting desk will send us the universes we advertise.
+// Output: builds and sends ArtDMX packets to configured nodes. A node's IP may be
+//         a unicast address or a broadcast address (255.255.255.255, or a subnet's
+//         x.x.x.255) for nodes whose IP you don't know — they pick out their own
+//         universe from the packet.
+// Input:  listens for ArtDMX from the console (to record), answers ArtPoll
+//         discovery with ArtPollReply so controllers/tools can find us, and can
+//         itself send ArtPoll to discover the nodes on the network.
+//
+// Universe numbers throughout are the 15-bit Art-Net Port-Address:
+//   Net (7 bits) · SubNet (4 bits) · Universe (4 bits) → net*256 + subnet*16 + universe
+// so a node set to Net 0 / SubNet 0 / Universe 1 is universe 1 here.
 //
 // ArtDMX layout (OpDmx 0x5000):
 //   0..7 "Art-Net\0" · 8..9 OpCode (LE) · 10..11 ProtVer (BE,=14) · 12 Seq ·
@@ -19,15 +26,113 @@ const OP_POLLREPLY = 0x2100;
 const ARTNET_ID = "Art-Net\0";
 const POLLREPLY_LEN = 239;
 
+// IPv4 interfaces with their directed-broadcast address.
+function localInterfaces() {
+  const out = [];
+  for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family !== "IPv4" || a.internal) continue;
+      const ip = a.address.split(".").map(Number);
+      const mask = a.netmask.split(".").map(Number);
+      out.push({
+        name,
+        address: a.address,
+        netmask: a.netmask,
+        mac: a.mac,
+        broadcast: ip.map((b, i) => (b & mask[i]) | (~mask[i] & 255)).join("."),
+      });
+    }
+  }
+  return out;
+}
+
 function createArtnetOutput(config, logger) {
   const socket = dgram.createSocket("udp4");
   socket.on("error", (err) => logger.error("Art-Net out socket error:", err.message));
+  // Broadcast outputs need SO_BROADCAST, which can only be set on a bound socket.
+  socket.bind(0, () => socket.setBroadcast(true));
 
   // Track which targets are currently failing so a downed/unreachable node logs
   // once, not every packet.
   const failing = new Set();
 
+  // One socket per network interface, bound to that interface's address AND the
+  // Art-Net port. Both matter:
+  //  - The OS routes 255.255.255.255 (and overlapping ranges like 169.254/16) via
+  //    the default interface only — on a Mac that's Wi-Fi, so a node cabled into an
+  //    Ethernet adapter never saw a broadcast. A socket bound to an interface's
+  //    address sends out of that interface.
+  //  - Art-Net traffic is meant to come FROM port 6454, and some nodes (e.g. Botex
+  //    DPX NET dimmers) silently ignore packets from any other source port.
+  // Binding address:6454 takes unicast packets addressed to that interface away
+  // from the wildcard input socket, so everything received here is handed to the
+  // input's handler (see onMessage). Re-scanned every 10s as adapters come and go.
+  const ifaceSockets = new Map(); // local address → { socket, broadcast, ready }
+  const receivers = [];
+  let ifacesCheckedAt = 0;
+  function interfaceSockets() {
+    if (Date.now() - ifacesCheckedAt > 10000) {
+      ifacesCheckedAt = Date.now();
+      const current = new Map(localInterfaces().map((i) => [i.address, i]));
+      for (const [addr, entry] of ifaceSockets) {
+        if (!current.has(addr)) {
+          try {
+            entry.socket.close();
+          } catch (_) {
+            /* already closed */
+          }
+          ifaceSockets.delete(addr);
+          logger.info(`Art-Net: interface ${addr} gone`);
+        }
+      }
+      for (const [addr, iface] of current) {
+        if (ifaceSockets.has(addr)) continue;
+        const s = dgram.createSocket({ type: "udp4", reuseAddr: true });
+        const entry = { socket: s, address: addr, netmask: iface.netmask, broadcast: iface.broadcast, ready: false };
+        s.on("error", (err) => logger.error(`Art-Net socket ${addr}:${config.artnetPort} error:`, err.message));
+        s.on("message", (msg, rinfo) => receivers.forEach((fn) => fn(msg, rinfo)));
+        s.bind(config.artnetPort, addr, () => {
+          s.setBroadcast(true);
+          entry.ready = true;
+        });
+        ifaceSockets.set(addr, entry);
+        logger.info(`Art-Net: sending via ${addr}:${config.artnetPort} (broadcast ${iface.broadcast})`);
+      }
+    }
+    return [...ifaceSockets.values()].filter((e) => e.ready);
+  }
+  interfaceSockets(); // bind now so unicast replies to our addresses are handled from the start
+
+  const sameSubnet = (ip, entry) => {
+    const a = ip.split(".").map(Number);
+    const b = entry.address.split(".").map(Number);
+    const m = entry.netmask.split(".").map(Number);
+    return a.length === 4 && a.every((x, i) => (x & m[i]) === (b[i] & m[i]));
+  };
+
+  // Send an Art-Net packet as a broadcast out of every interface, to both the
+  // limited (255.255.255.255) and that interface's directed broadcast address.
+  function broadcast(packet, port) {
+    for (const e of interfaceSockets()) {
+      send(e.socket, packet, port, "255.255.255.255", `broadcast via ${e.address}`);
+      send(e.socket, packet, port, e.broadcast, `${e.broadcast} via ${e.address}`);
+    }
+  }
+
   function sendUniverse(ip, port, universe, values) {
+    const packet = buildDmx(universe, values);
+    if (ip === "255.255.255.255") return broadcast(packet, port);
+    // Unicast from port 6454 on the interface facing the node, when there is one.
+    const entry = interfaceSockets().find((e) => sameSubnet(ip, e));
+    send(entry ? entry.socket : socket, packet, port, ip, ip);
+  }
+
+  // Register a handler for packets arriving on the per-interface sockets.
+  function onMessage(fn) {
+    receivers.push(fn);
+  }
+
+  function buildDmx(universe, values) {
     const packet = Buffer.alloc(HEADER_LEN + config.channels);
 
     packet.write(ARTNET_ID, 0, "ascii");
@@ -39,31 +144,37 @@ function createArtnetOutput(config, logger) {
     packet.writeUInt16BE(config.channels, 16);
 
     Buffer.from(values).copy(packet, HEADER_LEN);
+    return packet;
+  }
 
-    socket.send(packet, port, ip, (err) => {
+  // `label` identifies the target for logging (one line when it fails, one when it recovers).
+  function send(sock, packet, port, ip, label) {
+    sock.send(packet, port, ip, (err) => {
       if (err) {
-        if (!failing.has(ip)) {
-          failing.add(ip);
+        if (!failing.has(label)) {
+          failing.add(label);
           logger.error(
-            `Art-Net send to ${ip}:${port} failing: ${err.message} (further errors suppressed until it recovers)`
+            `Art-Net send to ${label}:${port} failing: ${err.message} (further errors suppressed until it recovers)`
           );
         }
-      } else if (failing.has(ip)) {
-        failing.delete(ip);
-        logger.info(`Art-Net send to ${ip} recovered`);
+      } else if (failing.has(label)) {
+        failing.delete(label);
+        logger.info(`Art-Net send to ${label} recovered`);
       }
     });
   }
 
   function close() {
-    try {
-      socket.close();
-    } catch (_) {
-      /* already closed */
+    for (const s of [socket, ...[...ifaceSockets.values()].map((e) => e.socket)]) {
+      try {
+        s.close();
+      } catch (_) {
+        /* already closed */
+      }
     }
   }
 
-  return { sendUniverse, close };
+  return { sendUniverse, broadcast, onMessage, close };
 }
 
 // Pick the local IPv4 interface facing the desk (same /24), else the first
@@ -134,10 +245,81 @@ function buildPollReply(config, localIp, mac, universes, page) {
   return buf;
 }
 
+// Parse an ArtPollReply into a plain node description.
+function parsePollReply(packet, rinfo) {
+  if (packet.length < 212) return null;
+  const str = (start, len) => packet.toString("ascii", start, start + len).replace(/\0.*$/s, "").trim();
+  const net = packet[18] & 0x7f;
+  const sub = packet[19] & 0x0f;
+  const numPorts = Math.min(4, packet.readUInt16BE(172));
+  const outputs = [];
+  const inputs = [];
+  for (let i = 0; i < numPorts; i++) {
+    const type = packet[174 + i];
+    if (type & 0x80) outputs.push((net << 8) | (sub << 4) | (packet[190 + i] & 0x0f)); // can output DMX
+    if (type & 0x40) inputs.push((net << 8) | (sub << 4) | (packet[186 + i] & 0x0f)); // can input DMX
+  }
+  return {
+    ip: [packet[10], packet[11], packet[12], packet[13]].join("."),
+    from: rinfo.address,
+    shortName: str(26, 18),
+    longName: str(44, 64),
+    report: str(108, 64),
+    mac: [...packet.subarray(201, 207)].map((b) => b.toString(16).padStart(2, "0")).join(":"),
+    bindIndex: packet[211] || 1,
+    outputs,
+    inputs,
+  };
+}
+
 // onDmx(universe, packet, length) is called for valid ArtDMX from the console.
-function createArtnetInput(config, logger, onDmx) {
+// `output` (optional) sends discovery polls out of every interface.
+function createArtnetInput(config, logger, onDmx, output) {
   const socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
   socket.on("error", (err) => logger.error("Art-Net in socket error:", err.message));
+
+  // Discovery: nodes that answered an ArtPoll, keyed "ip#bindIndex" (a node with
+  // more than 4 ports replies once per block of 4).
+  const nodes = new Map();
+  // Everyone sending ArtDMX to us (the desk, other controllers), keyed by IP.
+  const senders = new Map();
+  // Our own addresses (refreshed at most every 10s — this runs per DMX packet).
+  let localIps = { set: new Set(), at: 0 };
+  const isLocal = (ip) => {
+    if (Date.now() - localIps.at > 10000) {
+      localIps = { set: new Set(localInterfaces().map((i) => i.address)), at: Date.now() };
+    }
+    return ip.startsWith("127.") || localIps.set.has(ip);
+  };
+
+  // Broadcast ArtPoll out of every interface (plus subnet broadcasts and the
+  // conventional Art-Net ranges). Nodes reply to port 6454, i.e. this socket.
+  function poll() {
+    const packet = Buffer.alloc(14);
+    packet.write(ARTNET_ID, 0, "ascii");
+    packet.writeUInt16LE(OP_POLL, 8);
+    packet.writeUInt16BE(14, 10);
+    packet[12] = 0x02; // Flags: send ArtPollReply whenever node conditions change
+    packet[13] = 0; // DiagPriority
+    if (output) output.broadcast(packet, config.artnetPort);
+    const targets = new Set(["2.255.255.255", "10.255.255.255"]);
+    for (const i of localInterfaces()) targets.add(i.broadcast);
+    if (!output) targets.add("255.255.255.255");
+    for (const t of targets) {
+      socket.send(packet, config.artnetPort, t, (err) => {
+        if (err) logger.warn(`ArtPoll to ${t} failed: ${err.message}`);
+      });
+    }
+    return [...(output ? ["255.255.255.255 (every interface)"] : []), ...targets];
+  }
+
+  function getNodes() {
+    return {
+      nodes: [...nodes.values()].sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }) || a.bindIndex - b.bindIndex),
+      senders: [...senders.values()].map((s) => ({ ...s, universes: [...s.universes].sort((a, b) => a - b) })),
+      interfaces: localInterfaces().map(({ name, address, netmask, broadcast }) => ({ name, address, netmask, broadcast })),
+    };
+  }
 
   // Universes we advertise as outputs (the union of what we drive) — a unicasting
   // desk will then send these to us so we can record them.
@@ -160,7 +342,7 @@ function createArtnetInput(config, logger, onDmx) {
     }
   }
 
-  socket.on("message", (packet, rinfo) => {
+  function handleMessage(packet, rinfo) {
     if (packet.length < 10) return;
     if (packet.toString("ascii", 0, 8) !== ARTNET_ID) return;
     const opcode = packet.readUInt16LE(8);
@@ -171,12 +353,34 @@ function createArtnetInput(config, logger, onDmx) {
       return;
     }
 
+    if (opcode === OP_POLLREPLY) {
+      const node = parsePollReply(packet, rinfo);
+      if (node && !isLocal(node.ip) && !isLocal(rinfo.address)) {
+        node.lastSeen = Date.now();
+        nodes.set(`${node.ip}#${node.bindIndex}`, node);
+      }
+      return;
+    }
+
     if (opcode !== OP_DMX) return;
-    if (rinfo.address !== config.consoleIp) return; // only record the desk's DMX
     if (packet.length < HEADER_LEN) return;
 
     const universe = packet.readUInt16LE(14);
     const length = packet.readUInt16BE(16);
+
+    // Record who's sending (skipping our own output looping back to us).
+    if (!isLocal(rinfo.address) || rinfo.address === config.consoleIp) {
+      let s = senders.get(rinfo.address);
+      if (!s) {
+        s = { ip: rinfo.address, universes: new Set(), packets: 0, isConsole: rinfo.address === config.consoleIp };
+        senders.set(rinfo.address, s);
+      }
+      s.universes.add(universe);
+      s.packets++;
+      s.lastSeen = Date.now();
+    }
+
+    if (rinfo.address !== config.consoleIp) return; // only record the desk's DMX
     if (universe >= config.universes) return;
 
     if (!seenUniverses.has(universe)) {
@@ -185,9 +389,14 @@ function createArtnetInput(config, logger, onDmx) {
     }
 
     onDmx(universe, packet, length);
-  });
+  }
+
+  socket.on("message", handleMessage);
+  // Unicast to one of our addresses lands on the output's per-interface sockets.
+  if (output) output.onMessage(handleMessage);
 
   socket.bind(config.artnetPort, "0.0.0.0", () => {
+    socket.setBroadcast(true); // for ArtPoll discovery
     logger.info(`Listening for console Art-Net on :${config.artnetPort} from ${config.consoleIp}`);
     if (advertised.length) {
       logger.info(
@@ -204,7 +413,7 @@ function createArtnetInput(config, logger, onDmx) {
     }
   }
 
-  return { close };
+  return { close, poll, getNodes };
 }
 
-module.exports = { createArtnetOutput, createArtnetInput, buildPollReply };
+module.exports = { createArtnetOutput, createArtnetInput, buildPollReply, parsePollReply };

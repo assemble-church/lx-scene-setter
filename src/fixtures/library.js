@@ -76,6 +76,20 @@ function get(db, id) {
   return row;
 }
 
+// Find a patched fixture's personality by what it IS (manufacturer + name + mode),
+// not by row id — ids are reassigned on every import. `idHint` (the previously
+// linked id) only breaks ties if the library ever holds duplicates. Returns the id
+// or null if this library doesn't contain it.
+function findMatch(db, { manufacturer, name, mode, idHint }) {
+  const rows = db
+    .prepare("SELECT id, modes FROM fixtures WHERE manufacturer = ? AND name = ?")
+    .all(manufacturer || "", name || "");
+  const withMode = rows.filter((r) => JSON.parse(r.modes).some((m) => m.name === mode));
+  if (!withMode.length) return null;
+  const hinted = withMode.find((r) => r.id === idHint);
+  return (hinted || withMode[0]).id;
+}
+
 function manufacturers(db) {
   return db
     .prepare("SELECT DISTINCT manufacturer FROM fixtures ORDER BY manufacturer")
@@ -123,13 +137,26 @@ function channelLetters(mode) {
   return out;
 }
 
+// What each channel controls, by name ("Dimmer 3", "Pan"), for the patch's channel list.
+function channelNames(mode) {
+  const out = new Array(mode.channels || 0).fill("");
+  for (const a of mode.attrs || []) {
+    for (const off of a.offsets || []) {
+      if (off >= 1 && off <= out.length && !out[off - 1]) out[off - 1] = a.name || "";
+    }
+  }
+  return out;
+}
+
 module.exports = {
   openLibrary,
   replaceAll,
   count,
   search,
   get,
+  findMatch,
   manufacturers,
   channelFade,
   channelLetters,
+  channelNames,
 };

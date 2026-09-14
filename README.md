@@ -76,6 +76,42 @@ channel never pulls another scene down.
 
 ## Installation
 
+### Deploying from a dev machine (recommended)
+
+From a checkout on your laptop:
+
+```bash
+scripts/deploy.sh                       # → pi@ac-production-pi-1.local
+scripts/deploy.sh pi@192.168.88.205     # or any user@host
+```
+
+The same command does the first install and every update. It builds the UI
+locally, copies the app over SSH, and on the Pi (via `sudo`):
+
+1. installs Node 22 and 7-Zip if missing, and creates a `scene-setter` system user,
+2. unpacks a new release into `/opt/scene-setter/releases/<id>` and installs
+   production deps (reused from the previous release when the lockfile is unchanged),
+3. checks the new code loads and the existing config validates — before touching
+   the running service,
+4. backs up `config.jsonc` + `scene-setter.db` to `/opt/scene-setter/backups/<id>`,
+5. runs `npm run migrate` if the package defines one,
+6. switches `/opt/scene-setter/current` to the new release, restarts the service,
+   and **rolls back automatically** if it isn't healthy within ~30s.
+
+Config and data live outside the releases and are never overwritten by a deploy:
+
+| Path | Contents |
+| --- | --- |
+| `/opt/scene-setter/shared/config.jsonc` | venue config (created from the example on first install only) |
+| `/opt/scene-setter/shared/data/` | `scene-setter.db` (scenes, patch, layout, state), `fixtures.db` (library) |
+| `/opt/scene-setter/current` | symlink to the live release (last 5 kept) |
+
+The `scene-setter` systemd service starts on boot, restarts on any crash
+(`Restart=always`, no rate limit) and can only write to `shared/`. Manual
+rollback: `sudo ln -sfn /opt/scene-setter/releases/<id> /opt/scene-setter/current && sudo systemctl restart scene-setter`.
+
+### Installing from a git clone on the Pi
+
 On the Pi:
 
 ```bash
@@ -162,7 +198,7 @@ An Avolites-style grid where each patched fixture (or dimmer-pack **head**) is a
 - **Hover** a cell for a card with manufacturer, model, mode, universe, start
   address and channel range.
 - **Right-click → Move** (then click another cell to place; swaps if occupied) to
-  arrange the grid to match the room. The layout persists to `data/fixture-map.json`;
+  arrange the grid to match the room. The layout is saved in the database;
   with no map yet, fixtures are laid out in patch order.
 - **Right-click → Locate** to throw a fixture into a known, visible state
   (intensity full, pan/tilt centred, open white, shutter open).
@@ -195,8 +231,16 @@ wire, desk or house.
   manufacturer / name. *You supply your own file — no library is distributed.*
 - **Patch** fixtures to a universe / address, with a **count** for consecutive
   patching and a smart next-free-address suggestion (wraps universes when full).
-- **Per-channel snap vs fade** — auto-derived from the personality (overridable) so
-  shutters and control channels jump while levels crossfade.
+- **Dimmer packs** without a library — *+ Dimmer pack* adds a generic N-channel
+  dimmer (one head per channel), optionally with the last channels switched, e.g. a
+  Botex 12-channel with 1–10 dimmed and 11–12 as hot power.
+- **Per-channel type** (*Channels*):
+  - **Level** — normal; ramps with crossfades, or **snaps** (auto-derived from the
+    personality, overridable) so shutters and control channels jump.
+  - **Switch** — on/off only, for non-dim loads and hot power. Output is always 0 or
+    255 (≥50% = on); it comes on the moment a scene starts fading in and only goes off
+    once the scene has fully faded out, so power is never cut under a fading lamp. In
+    the programmer it's an ON/OFF control and never follows a dimmer fader.
 - **Assign an icon** per fixture and **split dimmer packs into heads** so each
   channel shows as its own light on the Fixtures grid.
 - A live **patch grid** visualises the addressing.
@@ -407,8 +451,12 @@ point an output at its IP.
   for *building* looks, but live scene **layering** is still HTP — it's not a full
   tracking moving-light console.
 - It never blacks out on exit, so a service restart won't drop a live venue.
-- Scenes are full snapshots stored as JSON (`data/scenes.json`); small and
-  human-inspectable, written atomically.
+- Scenes, the patch, the Fixtures-grid layout and which scenes are on live in one
+  SQLite database, `data/scene-setter.db` (WAL, fully synced writes). Schema changes
+  are numbered migrations applied automatically on start. The first start after
+  upgrading imports the old `scenes.json` / `state.json` / `patch.json` /
+  `fixture-map.json` and renames them to `*.migrated`. The imported fixture library
+  stays in its own `data/fixtures.db`; config stays in `config.jsonc`.
 
 ## License
 

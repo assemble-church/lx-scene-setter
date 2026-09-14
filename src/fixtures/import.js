@@ -8,16 +8,26 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawnSync, spawn } = require("child_process");
+const { Worker } = require("worker_threads");
 const { parseD4 } = require("./parse-d4");
 const { openLibrary, replaceAll } = require("./library");
 
 // Find an available 7-Zip binary (any of the common names across platforms).
+// Probing spawns a process, and status is polled by every open UI, so a hit is
+// cached for good and a miss is re-probed at most every 30s (e.g. after installing).
+let sevenZip = { bin: null, checkedAt: 0 };
 function find7z() {
+  if (sevenZip.bin || Date.now() - sevenZip.checkedAt < 30000) return sevenZip.bin;
+  let found = null;
   for (const bin of ["7zz", "7z", "7za"]) {
     const r = spawnSync(bin, ["--help"], { stdio: "ignore" });
-    if (!r.error) return bin;
+    if (!r.error) {
+      found = bin;
+      break;
+    }
   }
-  return null;
+  sevenZip = { bin: found, checkedAt: Date.now() };
+  return found;
 }
 
 // Per-OS instruction for installing 7-Zip when it's missing.
@@ -95,4 +105,24 @@ async function importLibrary(exePath, dbPath, onProgress = () => {}) {
   }
 }
 
-module.exports = { importLibrary, find7z, sevenZipStatus, sevenZipHint };
+// Run importLibrary on a worker thread (see import-worker.js). Same contract.
+function importLibraryInWorker(exePath, dbPath, onProgress = () => {}) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, "import-worker.js"), { workerData: { exePath, dbPath } });
+    let settled = false;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
+    worker.on("message", (msg) => {
+      if (msg.type === "progress") onProgress(msg.progress);
+      else if (msg.type === "done") settle(resolve, msg.result);
+      else if (msg.type === "error") settle(reject, new Error(msg.message));
+    });
+    worker.on("error", (err) => settle(reject, err));
+    worker.on("exit", (code) => settle(reject, new Error(`Import worker exited unexpectedly (code ${code})`)));
+  });
+}
+
+module.exports = { importLibrary, importLibraryInWorker, find7z, sevenZipStatus, sevenZipHint };

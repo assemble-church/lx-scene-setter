@@ -17,10 +17,21 @@
 //   - When the console falls silent past consoleTimeoutMs, the Pi takes over: it restores
 //     the layers that were on (fading them up), or the default scene if none.
 //   - Scene control is BLOCKED while the console is live. Recording IS allowed.
+//
+// Channel types (per patched channel):
+//   - level  — normal: scales with a layer's fade level, or snaps if marked snap.
+//   - switch — on/off (non-dim / hot power): always exactly 0 or 255 (≥128 = on).
+//     Like a snap channel it comes on the instant its layer starts fading in and
+//     only goes off once the layer has fully faded out, so power is never cut while
+//     the lamps it feeds are still fading.
 
 const now = () => Date.now();
 
-function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
+const SNAP = 1;
+const SWITCH = 2;
+const SWITCH_ON_AT = 128;
+
+function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
   const U = config.universes;
   const C = config.channels;
   const companion = config.companion || { customVariables: false };
@@ -39,46 +50,48 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   const current = Array.from({ length: U }, () => new Uint8Array(C));
 
   // Recorded looks: scenes[id] = { label, data } where data is array(U) of
-  // arrays(C), values 0..255. Older files stored just the array — migrate those.
-  const rawScenes = store.readJSON(config.scenesFile, {});
-  const scenes = {};
-  for (const id of Object.keys(rawScenes)) {
-    const v = rawScenes[id];
-    if (Array.isArray(v)) {
-      scenes[id] = { label: "", data: v };
-    } else {
-      scenes[id] = {
-        label: typeof v.label === "string" ? v.label : "",
-        data: Array.isArray(v.data) ? v.data : [],
-      };
-    }
+  // arrays(C), values 0..255.
+  const scenes = db.loadScenes();
+
+  function saveScene(id) {
+    db.saveScene(id, scenes[id]);
   }
 
-  function saveScenes() {
-    store.writeJSONAtomic(config.scenesFile, scenes);
-  }
-
-  // Patch — fixtures placed at addresses. Each entry carries a resolved per-channel
-  // `fade` array (from its personality + user overrides), so the engine never needs
-  // the fixture library at runtime. Compiled into snapMap[universe][channel].
-  let patch = store.readJSON(config.patchFile, { fixtures: [] });
-  if (!patch || !Array.isArray(patch.fixtures)) patch = { fixtures: [] };
+  // Patch — fixtures placed at addresses. Each entry carries resolved per-channel
+  // `fade` and `types` arrays (from its personality + user overrides), so the engine
+  // never needs the fixture library at runtime. Compiled into
+  // snapMap[universe][channel] (0 = fade, SNAP, SWITCH) plus a list of switch channels.
+  let patch = db.loadPatch();
   let snapMap = Array.from({ length: U }, () => new Uint8Array(C));
+  let switchChannels = []; // [universe, 0-based channel]
 
   function compileSnapMap() {
     snapMap = Array.from({ length: U }, () => new Uint8Array(C));
+    switchChannels = [];
     for (const fx of patch.fixtures) {
       const u = fx.universe | 0;
       if (u < 0 || u >= U) continue;
       const base = (fx.address | 0) - 1; // 0-based start channel
       const fade = Array.isArray(fx.fade) ? fx.fade : [];
-      for (let ch = 0; ch < fade.length; ch++) {
+      const types = Array.isArray(fx.types) ? fx.types : [];
+      for (let ch = 0; ch < (fx.channels | 0); ch++) {
         const abs = base + ch;
-        if (abs >= 0 && abs < C && fade[ch] === false) snapMap[u][abs] = 1;
+        if (abs < 0 || abs >= C) continue;
+        if (types[ch] === "switch") {
+          snapMap[u][abs] = SWITCH;
+          switchChannels.push([u, abs]);
+        } else if (fade[ch] === false) {
+          snapMap[u][abs] = SNAP;
+        }
       }
     }
   }
   compileSnapMap();
+
+  // Force switch channels to exactly off/on in the output buffer.
+  function applySwitches() {
+    for (const [u, ch] of switchChannels) current[u][ch] = current[u][ch] >= SWITCH_ON_AT ? 255 : 0;
+  }
 
   // Scene editor / live programmer.
   const editor = {
@@ -103,16 +116,14 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   const layers = {};
 
   // Persisted: which scene ids were on (restored on boot).
-  const persisted = store.readJSON(config.stateFile, {});
+  const persistedActive = db.getActiveScenes();
   const state = {
     consoleActive: false, // effective state (override applied) — drives behaviour & feedback
     consoleDetected: false, // raw network detection (packets + watchdog)
     consoleOverride: "auto", // "auto" | "on" | "off" — not persisted (resets to auto on boot)
     piOutputEnabled: true,
     lastConsolePacket: 0,
-    activeScenes: Array.isArray(persisted.activeScenes)
-      ? persisted.activeScenes.filter((id) => scenes[id])
-      : [],
+    activeScenes: persistedActive.filter((id) => scenes[id]),
   };
 
   let renderTimer = null;
@@ -212,7 +223,10 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     for (let u = 0; u < U; u++) current[u].fill(0);
     for (const id of Object.keys(layers)) {
       const L = layers[id];
-      if (L.level <= 0) continue;
+      // A layer fading in (target on) counts as on for snap/switch channels from
+      // its very first frame, even while its level is still exactly 0.
+      const on = L.level > 0 || L.target === 1;
+      if (!on) continue;
       const vals = L.values || (scenes[id] && scenes[id].data); // desk layer carries its own snapshot
       if (!vals) continue;
       const lvl = L.level;
@@ -224,9 +238,9 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
         const n = Math.min(C, src.length);
         for (let ch = 0; ch < n; ch++) {
           const raw = src[ch];
-          // Snap channels (shutters, control, etc.) jump to value while the layer
-          // is on rather than scaling with the fade level.
-          const v = snapU[ch] ? (lvl > 0 ? raw : 0) : lvl >= 1 ? raw : Math.round(raw * lvl);
+          // Snap and switch channels (shutters, control, hot power…) jump to value
+          // while the layer is on at all, rather than scaling with the fade level.
+          const v = snapU[ch] ? raw : lvl >= 1 ? raw : Math.round(raw * lvl);
           if (v > dst[ch]) dst[ch] = v;
         }
       }
@@ -237,9 +251,10 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     if (!state.piOutputEnabled) return;
     for (const node of config.outputs) {
       const port = node.port || config.artnetPort;
+      const ip = (node.ip || "").trim() || "255.255.255.255"; // no IP → broadcast
       for (const universe of node.universes) {
         if (universe >= U) continue;
-        output.sendUniverse(node.ip, port, universe, current[universe]);
+        output.sendUniverse(ip, port, universe, current[universe]);
       }
     }
   }
@@ -250,6 +265,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
       // Programmer mode: output the editor buffer verbatim (WYSIWYG of the scene
       // being built), bypassing the layer/HTP render.
       for (let u = 0; u < U; u++) current[u].set(editor.buf[u]);
+      applySwitches();
       outputAll();
       return;
     }
@@ -263,6 +279,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
         for (let ch = 0; ch < C; ch++) if (t[ch]) dst[ch] = b[ch];
       }
     }
+    applySwitches();
     outputAll();
   }
 
@@ -405,7 +422,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   }
 
   function persist() {
-    store.writeJSONAtomic(config.stateFile, { activeScenes: onIds() });
+    db.setActiveScenes(onIds());
   }
 
   // ---------------- CONSOLE FAILOVER ----------------
@@ -494,7 +511,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     }
     const label = scenes[id] ? scenes[id].label : "";
     scenes[id] = { label, data: current.map((u) => Array.from(u)) };
-    saveScenes();
+    saveScene(id);
     event("record", `Recorded scene ${id}`);
     sendOsc("/scene-setter/recorded", [{ type: "s", value: String(id) }]);
     broadcastScenes(); // publish the new scene's feedback path
@@ -511,7 +528,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   function createScene(label) {
     const id = nextSceneId();
     scenes[id] = { label: typeof label === "string" ? label : "", data: [] };
-    saveScenes();
+    saveScene(id);
     event("scene", `Created scene ${id}${scenes[id].label ? ` "${scenes[id].label}"` : ""}`);
     broadcastScenes();
     return id;
@@ -520,7 +537,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
   function setSceneLabel(id, label) {
     if (!scenes[id]) return false;
     scenes[id].label = typeof label === "string" ? label : "";
-    saveScenes();
+    db.setSceneLabel(id, scenes[id].label);
     broadcastScenes();
     return true;
   }
@@ -529,7 +546,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
     if (!scenes[id]) return false;
     delete scenes[id];
     if (layers[id]) delete layers[id]; // drop any live contribution
-    saveScenes();
+    db.deleteScene(id);
     persist();
     event("scene", `Deleted scene ${id}`);
     commit(); // re-render without it + publish
@@ -562,7 +579,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
       });
     });
     scenes[id] = { label, data };
-    saveScenes();
+    saveScene(id);
     if (layers[id]) commit(); // re-render if live
     else broadcastScenes();
     return true;
@@ -849,7 +866,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
       label: scenes[editor.sceneId].label,
       data: editor.buf.map((u) => Array.from(u)),
     };
-    saveScenes();
+    saveScene(editor.sceneId);
     event("record", `Edited scene ${editor.sceneId}`);
     broadcastScenes();
     return true;
@@ -963,7 +980,7 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
 
   // Fixture map — UI-only layout of fixtures/heads onto the Fixtures grid.
   function getFixtureMap() {
-    return store.readJSON(config.fixtureMapFile, { cols: 25, rows: 25, cells: {} });
+    return db.getFixtureMap();
   }
   function setFixtureMap(next) {
     const map = {
@@ -971,14 +988,19 @@ function createEngine({ config, logger, store, output, sendOsc, sendRaw }) {
       rows: Math.max(1, (next && next.rows) | 0 || 25),
       cells: next && next.cells && typeof next.cells === "object" ? next.cells : {},
     };
-    store.writeJSONAtomic(config.fixtureMapFile, map);
+    db.setFixtureMap(map);
     return map;
   }
 
   // Replace the patch, persist, recompile the snap map, and re-render.
   function setPatch(next) {
-    patch = next && Array.isArray(next.fixtures) ? next : { fixtures: [] };
-    store.writeJSONAtomic(config.patchFile, patch);
+    try {
+      db.savePatch(next && Array.isArray(next.fixtures) ? next : { fixtures: [] });
+    } finally {
+      // Always reload: normalised on success (e.g. switch channels never fade), and
+      // on failure it discards any in-place edits the caller made to the old object.
+      patch = db.loadPatch();
+    }
     compileSnapMap();
     renderAndOutput();
     return patch;
