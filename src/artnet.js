@@ -119,19 +119,37 @@ function createArtnetOutput(config, logger) {
   //                       169.254.255.255): sent once, from that interface, to
   //                       every device on that network. Some nodes (Botex DPX NET)
   //                       only accept this form.
-  //   broadcast         — 255.255.255.255 / blank: once per physical port.
+  //   broadcast         — 255.255.255.255 / blank: from EVERY local address, to both
+  //                       255.255.255.255 and that address's subnet broadcast. The
+  //                       widest net: it's what the venue Botex DPX NET is proven to
+  //                       respond to (a single 169.254.50.50 → 169.254.255.255 copy
+  //                       was not enough on 2026-09-15).
   //   routed            — anywhere else: handed to the OS routing table.
+  //   fixed             — the output names a `source` address: exactly one copy,
+  //                       from that address to ip. For nodes that only accept one
+  //                       specific form (the Botex: 169.254.x.x → 255.255.255.255,
+  //                       sent on the Art-Net VLAN only).
   // Returns { mode, sends: [{ socket, dest, via }], warning? }.
-  function route(ip) {
+  function route(ip, source) {
     const entries = interfaceSockets();
+    if (source) {
+      const e = entries.find((x) => x.address === source);
+      if (!e) {
+        return {
+          mode: "fixed",
+          sends: [],
+          warning: `not sending: this machine has no address ${source} (check the network port / VLAN it lives on)`,
+        };
+      }
+      return { mode: "fixed", sends: [{ socket: e.socket, dest: ip || "255.255.255.255", via: `${e.name} ${e.address}` }] };
+    }
     if (!ip || ip === "255.255.255.255") {
-      const perPort = new Map();
-      for (const e of entries) if (!perPort.has(e.name)) perPort.set(e.name, e);
-      return {
-        mode: "broadcast",
-        sends: [...perPort.values()].map((e) => ({ socket: e.socket, dest: "255.255.255.255", via: `${e.name} ${e.address}` })),
-        warning: perPort.size ? undefined : "no network interface is up",
-      };
+      const sends = [];
+      for (const e of entries) {
+        sends.push({ socket: e.socket, dest: "255.255.255.255", via: `${e.name} ${e.address}` });
+        if (e.broadcast && e.broadcast !== "255.255.255.255") sends.push({ socket: e.socket, dest: e.broadcast, via: `${e.name} ${e.address}` });
+      }
+      return { mode: "broadcast", sends, warning: sends.length ? undefined : "no network interface is up" };
     }
     const bcast = entries.find((e) => e.broadcast === ip);
     if (bcast) return { mode: "subnet-broadcast", sends: [{ socket: bcast.socket, dest: ip, via: `${bcast.name} ${bcast.address}` }] };
@@ -161,18 +179,19 @@ function createArtnetOutput(config, logger) {
     for (const s of route("255.255.255.255").sends) send(s.socket, packet, port, s.dest, `broadcast via ${s.via}`);
   }
 
-  function sendUniverse(ip, port, universe, values) {
+  function sendUniverse(ip, port, universe, values, source) {
     const packet = buildDmx(universe, values);
-    for (const s of route(ip).sends) send(s.socket, packet, port, s.dest, s.dest === ip ? ip : `${s.dest} via ${s.via}`);
+    for (const s of route(ip, source).sends) send(s.socket, packet, port, s.dest, s.dest === ip ? ip : `${s.dest} via ${s.via}`);
   }
 
   // For the UI: how each configured output is actually being sent right now.
   function describeOutputs(outputs) {
     return (outputs || []).map((o) => {
-      const r = route((o.ip || "").trim() || "255.255.255.255");
+      const r = route((o.ip || "").trim() || "255.255.255.255", (o.source || "").trim() || undefined);
       return {
         name: o.name,
         ip: o.ip,
+        source: o.source || undefined,
         universes: o.universes,
         mode: r.mode,
         via: r.sends.map((s) => s.via),
@@ -279,9 +298,9 @@ function buildPollReply(config, localIp, mac, universes, page) {
   buf[22] = 0; // Ubea
   buf[23] = 0xd0; // Status1: indicators normal
   buf.writeUInt16LE(0x0000, 24); // EstaMan (Lo,Hi)
-  buf.write("PiSceneSetter", 26, 17, "ascii"); // ShortName
-  buf.write("Assembly Rooms Art-Net Scene Setter", 44, 63, "ascii"); // LongName
-  buf.write(`#0001 [${page}] Scene Setter OK`, 108, 63, "ascii"); // NodeReport
+  buf.write("Light It", 26, 17, "ascii"); // ShortName
+  buf.write("Light It - Assembly Rooms house lighting", 44, 63, "ascii"); // LongName
+  buf.write(`#0001 [${page}] Light It OK`, 108, 63, "ascii"); // NodeReport
   buf.writeUInt16BE(pageUnis.length, 172); // NumPorts (Hi,Lo)
   for (let i = 0; i < pageUnis.length; i++) {
     buf[174 + i] = 0x80; // PortType: output, DMX512
@@ -368,6 +387,15 @@ function createArtnetInput(config, logger, onDmx, output) {
     return [...(output ? ["255.255.255.255 (every interface)"] : []), ...targets];
   }
 
+  // Cheap view of current ArtDMX senders (heard in the last 10s), for the live
+  // dashboard snapshot — no interface scan.
+  function getSenders() {
+    const cutoff = Date.now() - 10000;
+    return [...senders.values()]
+      .filter((s) => s.lastSeen >= cutoff)
+      .map((s) => ({ ip: s.ip, isConsole: s.isConsole, universes: [...s.universes].sort((a, b) => a - b), agoMs: Date.now() - s.lastSeen }));
+  }
+
   function getNodes() {
     return {
       nodes: [...nodes.values()].sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }) || a.bindIndex - b.bindIndex),
@@ -377,9 +405,14 @@ function createArtnetInput(config, logger, onDmx, output) {
     };
   }
 
-  // Universes we advertise as outputs (the union of what we drive) — a unicasting
-  // desk will then send these to us so we can record them.
-  const advertised = [...new Set((config.outputs || []).flatMap((o) => o.universes))]
+  // Universes we advertise as outputs — everything we drive plus the configured
+  // universe range — so a unicasting desk sends them to us and we can record them.
+  const advertised = [
+    ...new Set([
+      ...(config.outputs || []).flatMap((o) => o.universes),
+      ...Array.from({ length: config.universes }, (_, u) => u),
+    ]),
+  ]
     .filter((u) => Number.isInteger(u) && u >= 0 && u < 32768)
     .sort((a, b) => a - b);
 
@@ -437,7 +470,7 @@ function createArtnetInput(config, logger, onDmx, output) {
     }
 
     if (rinfo.address !== config.consoleIp) return; // only record the desk's DMX
-    if (universe >= config.universes) return;
+    if (universe > 32767) return; // not a valid Port-Address (the engine grows to fit the rest)
 
     if (!seenUniverses.has(universe)) {
       seenUniverses.add(universe);
@@ -469,7 +502,7 @@ function createArtnetInput(config, logger, onDmx, output) {
     }
   }
 
-  return { close, poll, getNodes };
+  return { close, poll, getNodes, getSenders };
 }
 
 module.exports = { createArtnetOutput, createArtnetInput, buildPollReply, parsePollReply };

@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import type { PatchFixture } from "@/lib/api";
+import { useDmxFrames } from "@/lib/useDmx";
 
 const COLS = 100;
 const FIX_BORDER = "hsl(210 90% 62%)"; // fixture outline
@@ -71,20 +72,17 @@ export function UniverseGrid({
 
   // Live DMX colour, written imperatively so we don't re-render 512 cells.
   const refs = useRef<(HTMLDivElement | null)[]>([]);
-  useEffect(() => {
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws/dmx`);
-    ws.binaryType = "arraybuffer";
-    ws.onmessage = (e) => {
-      const bytes = new Uint8Array(e.data as ArrayBuffer);
+  const onFrame = useCallback(
+    (bytes: Uint8Array) => {
       const base = universe * channels;
       for (let i = 0; i < channels; i++) {
         const cell = refs.current[i];
         if (cell) cell.style.backgroundColor = cellColor(bytes[base + i] || 0);
       }
-    };
-    return () => ws.close();
-  }, [universe, channels]);
+    },
+    [universe, channels]
+  );
+  useDmxFrames(onFrame);
 
   return (
     <div

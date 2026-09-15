@@ -31,8 +31,8 @@ const FILE_DEFAULTS = {
   console: {
     ip: "10.10.20.10", // desk's IP — also the source filter for recording
     timeoutMs: 1000, // silence before the desk is considered "lost"
-    defaultScene: "1", // scene to recall on handoff when nothing else is on
-    defaultFade: 3, // crossfade time (seconds) on console handoff / startup
+    defaultScene: "1", // scene recalled at startup when nothing was on (desk loss holds its last look instead)
+    defaultFade: 3, // fade-up time (seconds) for scenes restored at startup
   },
 
   // Art-Net (DMX) network.
@@ -221,9 +221,9 @@ function serializeConfig(g) {
   const outputs = (g.artnet.outputs || [])
     .map(
       (o) =>
-        `    { "name": ${j(o.name || "")}, "ip": ${j(o.ip || "")}, "port": ${
-          o.port ?? g.artnet.port
-        }, "universes": ${j(o.universes || [])} }`
+        `    { "name": ${j(o.name || "")}, "ip": ${j(o.ip || "")}, ${
+          o.source && String(o.source).trim() ? `"source": ${j(String(o.source).trim())}, ` : ""
+        }"port": ${o.port ?? g.artnet.port}, "universes": ${j(o.universes || [])} }`
     )
     .join(",\n");
   const targets = (g.companion.feedbackTargets || [])
@@ -235,8 +235,8 @@ function serializeConfig(g) {
   "console": {
     "ip": ${j(g.console.ip)},                 // desk's IP — also the source filter for recording
     "timeoutMs": ${g.console.timeoutMs},      // silence before the desk is considered "lost"
-    "defaultScene": ${j(g.console.defaultScene)},  // recalled on handoff if nothing else is on
-    "defaultFade": ${g.console.defaultFade}   // crossfade seconds on handoff / startup
+    "defaultScene": ${j(g.console.defaultScene)},  // recalled at startup if nothing was on (desk loss holds its last look)
+    "defaultFade": ${g.console.defaultFade}   // fade-up seconds for scenes restored at startup
   },
 
   // ── Art-Net / DMX network ─────────────────────────────────────────────────
@@ -245,6 +245,9 @@ function serializeConfig(g) {
     "localIp": ${j(g.artnet.localIp)},        // advertised in ArtPollReply; blank = auto-detect
     "universes": ${g.artnet.universes},
     "channels": ${g.artnet.channels},
+    // Outputs: "ip" = the node's own IP (only it receives), or a broadcast address.
+    // "source" (optional) = send exactly one packet from this address of the Pi,
+    // e.g. the Botex: ip 255.255.255.255 from 169.254.50.51 on the Art-Net VLAN.
     "outputs": [
 ${outputs}
     ]
@@ -299,6 +302,7 @@ function validate(config) {
   } else {
     config.outputs.forEach((o, i) => {
       if (typeof o.ip !== "string") errors.push(`artnet.outputs[${i}].ip must be a string`);
+      if (o.source !== undefined && typeof o.source !== "string") errors.push(`artnet.outputs[${i}].source must be a string`);
       if (!Array.isArray(o.universes)) errors.push(`artnet.outputs[${i}].universes must be an array`);
     });
   }

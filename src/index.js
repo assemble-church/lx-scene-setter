@@ -9,6 +9,7 @@ const { createArtnetOutput, createArtnetInput } = require("./artnet");
 const { createOsc } = require("./osc");
 const { createEngine } = require("./engine");
 const { createApi } = require("./api");
+const { createRecorder } = require("./sequences/recorder");
 
 let config;
 try {
@@ -30,6 +31,7 @@ const output = createArtnetOutput(config, logger);
 
 // engine and osc reference each other, so create osc with a late-bound handler.
 let engine;
+const recorder = createRecorder({ logger, channels: config.channels });
 const oscPort = createOsc(config, logger, (msg) => engine.handleOsc(msg));
 
 engine = createEngine({
@@ -39,15 +41,16 @@ engine = createEngine({
   output,
   sendOsc: oscPort.send,
   sendRaw: oscPort.sendRaw,
+  recorder,
 });
 
 const artnetIn = createArtnetInput(config, logger, (u, p, l) => engine.onDmx(u, p, l), output);
 
-const api = createApi(config, logger, engine, artnetIn);
+const api = createApi(config, logger, engine, artnetIn, recorder);
 
 const stop = engine.start();
 
-logger.info("Scene Setter running");
+logger.info("Light It running");
 logger.info(`Config:       ${config.configPath}`);
 logger.info(`OSC in:       ${config.oscPort}`);
 logger.info(`Art-Net in/out: ${config.artnetPort}`);
@@ -66,6 +69,11 @@ function shutdown(signal) {
   logger.info(`Received ${signal}, shutting down`);
   try {
     stop();
+  } catch (_) {
+    /* ignore */
+  }
+  try {
+    recorder.close();
   } catch (_) {
     /* ignore */
   }

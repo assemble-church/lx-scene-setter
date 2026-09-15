@@ -88,6 +88,22 @@ const MIGRATIONS = [
     `);
     importLegacyJson(db, ctx);
   },
+  // 2 — scene favourites (pinned to the dashboard console).
+  (db) => {
+    db.exec("ALTER TABLE scenes ADD COLUMN favourite INTEGER NOT NULL DEFAULT 0");
+  },
+  // 3 — sequences: recorded chases/effects, stored as a looping model (JSON, see
+  // src/sequences/model.js).
+  (db) => {
+    db.exec(`
+      CREATE TABLE sequences (
+        id      TEXT PRIMARY KEY,
+        label   TEXT    NOT NULL DEFAULT '',
+        created INTEGER NOT NULL,          -- epoch ms
+        model   TEXT    NOT NULL
+      );
+    `);
+  },
 ];
 
 function readLegacy(file) {
@@ -147,44 +163,50 @@ function channelRows(fx) {
 }
 
 function queries(db) {
-  const q = {
-    scenes: db.prepare("SELECT id, label FROM scenes"),
-    sceneUniverses: db.prepare("SELECT scene_id, universe, dmx FROM scene_universes ORDER BY scene_id, universe"),
-    upsertScene: db.prepare(
-      "INSERT INTO scenes (id, label) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET label = excluded.label"
-    ),
-    clearSceneUniverses: db.prepare("DELETE FROM scene_universes WHERE scene_id = ?"),
-    insertSceneUniverse: db.prepare("INSERT INTO scene_universes (scene_id, universe, dmx) VALUES (?, ?, ?)"),
-    setLabel: db.prepare("UPDATE scenes SET label = ? WHERE id = ?"),
-    deleteScene: db.prepare("DELETE FROM scenes WHERE id = ?"),
+  // Prepared on first use: the legacy import runs inside migration 1, before later
+  // migrations have added the tables and columns some of these statements need.
+  const sql = {
+    scenes: "SELECT id, label, favourite FROM scenes",
+    sceneUniverses: "SELECT scene_id, universe, dmx FROM scene_universes ORDER BY scene_id, universe",
+    upsertScene: "INSERT INTO scenes (id, label) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET label = excluded.label",
+    clearSceneUniverses: "DELETE FROM scene_universes WHERE scene_id = ?",
+    insertSceneUniverse: "INSERT INTO scene_universes (scene_id, universe, dmx) VALUES (?, ?, ?)",
+    setLabel: "UPDATE scenes SET label = ? WHERE id = ?",
+    setFavourite: "UPDATE scenes SET favourite = ? WHERE id = ?",
+    deleteScene: "DELETE FROM scenes WHERE id = ?",
 
-    kvGet: db.prepare("SELECT value FROM kv WHERE key = ?"),
-    kvSet: db.prepare(
-      "INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
-    ),
+    kvGet: "SELECT value FROM kv WHERE key = ?",
+    kvSet: "INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
 
-    fixtures: db.prepare("SELECT * FROM patch_fixtures ORDER BY position"),
-    channels: db.prepare("SELECT * FROM patch_channels ORDER BY fixture_id, offset"),
-    heads: db.prepare("SELECT * FROM patch_heads ORDER BY fixture_id, offset"),
-    clearFixtures: db.prepare("DELETE FROM patch_fixtures"),
-    insertFixture: db.prepare(`
+    fixtures: "SELECT * FROM patch_fixtures ORDER BY position",
+    channels: "SELECT * FROM patch_channels ORDER BY fixture_id, offset",
+    heads: "SELECT * FROM patch_heads ORDER BY fixture_id, offset",
+    clearFixtures: "DELETE FROM patch_fixtures",
+    insertFixture: `
       INSERT INTO patch_fixtures
         (id, position, lib_id, manufacturer, name, label, mode, channel_count, universe, address, icon)
       VALUES (@id, @position, @libId, @manufacturer, @name, @label, @mode, @channels, @universe, @address, @icon)
-    `),
-    insertChannel: db.prepare(`
+    `,
+    insertChannel: `
       INSERT INTO patch_channels (fixture_id, offset, name, letter, type, fade)
       VALUES (@fixtureId, @offset, @name, @letter, @type, @fade)
-    `),
-    insertHead: db.prepare(`
+    `,
+    insertHead: `
       INSERT INTO patch_heads (fixture_id, offset, span, label, icon)
       VALUES (@fixtureId, @offset, @span, @label, @icon)
-    `),
+    `,
 
-    mapCells: db.prepare("SELECT item_key, cell FROM fixture_map_cells"),
-    clearMapCells: db.prepare("DELETE FROM fixture_map_cells"),
-    insertMapCell: db.prepare("INSERT INTO fixture_map_cells (item_key, cell) VALUES (?, ?)"),
+    sequences: "SELECT id, label, created, model FROM sequences",
+    insertSequence: "INSERT INTO sequences (id, label, created, model) VALUES (?, ?, ?, ?)",
+    setSequenceLabel: "UPDATE sequences SET label = ? WHERE id = ?",
+    deleteSequence: "DELETE FROM sequences WHERE id = ?",
+
+    mapCells: "SELECT item_key, cell FROM fixture_map_cells",
+    clearMapCells: "DELETE FROM fixture_map_cells",
+    insertMapCell: "INSERT INTO fixture_map_cells (item_key, cell) VALUES (?, ?)",
   };
+  const prepared = {};
+  const q = new Proxy(prepared, { get: (cache, key) => (cache[key] ||= db.prepare(sql[key])) });
 
   const kvGet = (key, fallback) => {
     const row = q.kvGet.get(key);
@@ -198,10 +220,10 @@ function queries(db) {
   const kvSet = (key, value) => q.kvSet.run(key, JSON.stringify(value));
 
   return {
-    // scenes[id] = { label, data } — data is array(universe) of arrays(channel), as the engine uses.
+    // scenes[id] = { label, favourite, data } — data is array(universe) of arrays(channel), as the engine uses.
     loadScenes() {
       const scenes = {};
-      for (const r of q.scenes.all()) scenes[r.id] = { label: r.label, data: [] };
+      for (const r of q.scenes.all()) scenes[r.id] = { label: r.label, favourite: r.favourite === 1, data: [] };
       for (const r of q.sceneUniverses.all()) {
         const s = scenes[r.scene_id];
         if (s) s.data[r.universe] = Array.from(r.dmx);
@@ -225,6 +247,10 @@ function queries(db) {
       q.setLabel.run(label || "", String(id));
     },
 
+    setSceneFavourite(id, favourite) {
+      q.setFavourite.run(favourite ? 1 : 0, String(id));
+    },
+
     deleteScene(id) {
       q.deleteScene.run(String(id));
     },
@@ -236,6 +262,52 @@ function queries(db) {
 
     setActiveScenes(ids) {
       kvSet("activeScenes", ids);
+    },
+
+    // sequences[id] = { label, created, model } — model as stored (see src/sequences/model.js).
+    loadSequences() {
+      const out = {};
+      for (const r of q.sequences.all()) {
+        try {
+          out[r.id] = { label: r.label, created: r.created, model: JSON.parse(r.model) };
+        } catch (_) {
+          /* unreadable row: skip it rather than fail to start */
+        }
+      }
+      return out;
+    },
+
+    insertSequence(id, { label, created, model }) {
+      q.insertSequence.run(String(id), label || "", created, JSON.stringify(model));
+    },
+
+    setSequenceLabel(id, label) {
+      q.setSequenceLabel.run(label || "", String(id));
+    },
+
+    deleteSequence(id) {
+      q.deleteSequence.run(String(id));
+    },
+
+    getActiveSequences() {
+      const ids = kvGet("activeSequences", []);
+      return Array.isArray(ids) ? ids.map(String) : [];
+    },
+
+    setActiveSequences(ids) {
+      kvSet("activeSequences", ids);
+    },
+
+    // The desk look being held after the desk went away (array of per-universe
+    // byte arrays), or null. Stored base64 per universe to keep the row small.
+    getHeldLook() {
+      const v = kvGet("heldLook", null);
+      return Array.isArray(v) ? v.map((b64) => Uint8Array.from(Buffer.from(b64 || "", "base64"))) : null;
+    },
+
+    setHeldLook(universes) {
+      if (!universes) return void kvSet("heldLook", null);
+      kvSet("heldLook", universes.map((u) => Buffer.from(Uint8Array.from(u)).toString("base64")));
     },
 
     // Patch in the API shape: { fixtures: [{ id, libId, …, fade[], letters[], names[], types[], heads? }] }

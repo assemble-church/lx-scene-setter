@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Installs the Scene Setter as a systemd service on a Raspberry Pi (or any
+# Installs Light It as a systemd service on a Raspberry Pi (or any
 # systemd Linux box). Idempotent: safe to re-run after a git pull to upgrade.
 #
 # Usage:  ./scripts/install.sh

@@ -223,7 +223,7 @@ function AddDialog({
             <label className="block text-sm">
               Mode
               <select
-                className="mt-1 h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+                className="mt-1 h-9 w-full rounded-lg border border-white/10 bg-white/[0.04] px-2 text-sm focus:border-ring/60 focus:outline-none focus:ring-[3px] focus:ring-ring/25"
                 value={mode}
                 onChange={(e) => setMode(e.target.value)}
               >
@@ -504,7 +504,7 @@ function ChannelsDialog({
         </DialogHeader>
         <div className="max-h-96 space-y-1 overflow-auto">
           {rows.map((r, i) => (
-            <div key={i} className="flex items-center gap-3 rounded border border-border/50 px-3 py-1.5 text-sm">
+            <div key={i} className="flex items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-sm">
               <span className="w-14 shrink-0 tabular-nums text-muted-foreground">
                 Ch {i + 1}
                 {entry && <span className="block text-[10px]">DMX {entry.address + i}</span>}
@@ -640,7 +640,7 @@ function IconsDialog({
         {entry && heads ? (
           <div className="max-h-96 space-y-2 overflow-auto">
             {heads.map((h, i) => (
-              <div key={i} className="flex flex-wrap items-center gap-3 rounded border border-border/50 p-2">
+              <div key={i} className="flex flex-wrap items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-2">
                 <span className="w-16 shrink-0 text-xs tabular-nums text-muted-foreground">
                   ch {entry.address + h.offset - 1}
                 </span>
@@ -748,7 +748,7 @@ export function Patch() {
               onChange={(e) => doSearch(e.target.value)}
             />
             {results.length > 0 && (
-              <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-72 divide-y divide-border/40 overflow-auto rounded-md border border-border bg-popover shadow-lg">
+              <div className="glass-pop pop-in absolute left-0 right-0 top-full z-30 mt-1 max-h-72 divide-y divide-white/[0.05] overflow-auto rounded-lg">
                 {results.map((r) => (
                   <button
                     key={r.id}
@@ -801,7 +801,7 @@ export function Patch() {
           {patch.length ? (
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-border text-left text-muted-foreground">
+                <tr className="border-b border-white/[0.06] text-left text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
                   <th className="w-16 px-4 py-2 font-medium">Icon</th>
                   <th className="px-4 py-2 font-medium">Label</th>
                   <th className="px-4 py-2 font-medium">Fixture</th>
@@ -814,7 +814,7 @@ export function Patch() {
               </thead>
               <tbody>
                 {patch.map((fx) => (
-                  <tr key={fx.id} className="border-b border-border/40 last:border-0">
+                  <tr key={fx.id} className="border-b border-white/[0.04] transition-colors last:border-0 hover:bg-white/[0.02]">
                     <td className="px-4 py-2">
                       <button
                         onClick={() => setIconEdit(fx)}

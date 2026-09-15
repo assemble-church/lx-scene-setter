@@ -1,4 +1,4 @@
-# Art-Net Scene Setter
+# Light It
 
 A small, reliable **house-lighting controller with automatic console failover**,
 for buildings that use a proper lighting desk *sometimes* but need simple,
@@ -19,9 +19,9 @@ This box sits on the lighting network and does both, automatically:
 
 - **Desk is live →** it gets out of the way and lets the console run the rig,
   while quietly watching so it can *record* looks straight off the desk.
-- **Desk goes away →** within a second it **takes over** and runs your recorded
-  scenes, crossfading smoothly from whatever the desk left on stage (no flash to
-  black).
+- **Desk goes away →** within a second it **takes over and holds the desk's last
+  look** — nothing changes on stage. When you're ready, press a scene and it
+  crossfades out of the held look (hold on fail).
 
 Crucially it sits **alongside** the desk, never inline — so if the Pi ever fails,
 the desk still controls the rig directly. The Pi is purely additive insurance.
@@ -29,8 +29,12 @@ the desk still controls the rig directly. The Pi is purely additive insurance.
 ## Features
 
 - **Automatic console failover** with a configurable timeout.
-- **Seamless crossfade** from the desk's last look into the house scenes on handoff.
-- **Record scenes** straight from the live desk output, persisted to disk.
+- **Hold on fail** — the desk's last look stays up (and survives a Pi restart) until
+  a scene is pressed, which crossfades out of it.
+- **Desk detection on the dashboard** — desk live / holding / house control, packet
+  rate, universes heard, and a warning if Art-Net arrives from a different IP.
+- **Record scenes** straight from the live desk output — every universe the desk
+  sends (0–255) — persisted to disk.
 - **HTP scene layers** — scenes stack like submasters: turn one off and it only
   drops the channels it alone was holding up. Each layer toggles independently
   with its own fade time.
@@ -47,6 +51,13 @@ the desk still controls the rig directly. The Pi is purely additive insurance.
 - **Web-based moving-light programmer** — an Avolites-style fixture grid and a
   live programmer for building looks (intensity, colour, pan/tilt, gobo…) and
   saving them straight to scenes, all in the browser.
+- **Sequences** — record a chase or effect straight off the desk; Light It works out
+  the loop by itself (layered shape generators included, no patch needed), then plays
+  it back with fades from the Dashboard or Companion, alongside scenes.
+- **Dashboard console** — favourite scenes as fader strips, live scenes, sequence
+  pads with loop dials, live universe grids and an activity log.
+- **Companion module** — served by the app itself (Companion page → Download), with
+  live scene/sequence dropdowns, feedbacks, variables and presets.
 - **Terminal Art-Net monitor** — a standalone CLI to visualise any Art-Net stream.
 
 ## How it works
@@ -58,8 +69,8 @@ the desk still controls the rig directly. The Pi is purely additive insurance.
                  └────────────────────────────────────┘
                                   │  desk goes silent (timeout)
                                   ▼
-   Pi Scene  ─── takes over, crossfades to recorded house scenes ───► DMX nodes
-   Setter         (recall / toggle scenes from a Stream Deck via OSC)
+   Pi:       ─── takes over, HOLDS the desk's last look ───► DMX nodes
+   Light It       press a scene (Stream Deck via OSC) → crossfade out of the hold
 ```
 
 Scenes are **HTP layers**. The output of each DMX channel is the highest value
@@ -82,11 +93,11 @@ From a checkout on your laptop:
 
 ```bash
 scripts/deploy.sh                       # → pi@ac-production-pi-1.local
-scripts/deploy.sh pi@192.168.88.205     # or any user@host
+scripts/deploy.sh pi@10.10.10.30        # or any user@host (the venue Pi)
 ```
 
-The same command does the first install and every update. It builds the UI
-locally, copies the app over SSH, and on the Pi (via `sudo`):
+The same command does the first install and every update. It builds the UI and the
+Companion module locally, copies the app over SSH, and on the Pi (via `sudo`):
 
 1. installs Node 22 and 7-Zip if missing, and creates a `scene-setter` system user,
 2. unpacks a new release into `/opt/scene-setter/releases/<id>` and installs
@@ -181,13 +192,43 @@ The control panel at `http://<pi-ip>:8080` (or the Vite dev URL) is a dark,
 single-page app; every page shares one live WebSocket to the engine.
 
 ### Dashboard
-At-a-glance state: per-scene level bars, live fade countdowns, console / output
-status badges, and a rolling activity log.
+At-a-glance state: desk detection, the scene console (favourites and live
+scenes as fader strips), sequence pads, live universe grids and a rolling
+activity log.
+
+### Companion
+Download the Light It Companion module (with setup steps), plus the full reference
+of OSC commands, OSC feedback paths and custom variables, and the scene/sequence ids.
 
 ### Scenes
 All recorded scenes with inline label editing. Per scene: **Activate / Deactivate**
 (with fade), **Record** (snapshot the current output), **Edit** (opens the fixture
 programmer with that scene loaded — see below), raw-JSON edit, and delete.
+
+### Sequences
+Chases and effects recorded from the desk, looped by the Pi. No patch needed.
+
+1. Play the chase on the desk, press **New sequence**, then **Record**. A live scope
+   shows what the recorder is learning: a dial per effect where each pass lands on
+   the last once the period is right, an XY trail for anything that looks like
+   pan/tilt (16-bit channels two apart), and swatches for anything that looks like
+   RGB.
+2. Recording **stops by itself** once every effect has come round about three times,
+   predicts frames it wasn't fitted on, and two analyses in a row agree. You can
+   stop sooner, or turn auto stop off. Takes are capped at 5 minutes.
+3. **Review**: keep or drop each effect, and choose whether the **still look**
+   (lit channels that didn't move, e.g. blue house lights) comes with it. Name it
+   and save.
+
+How it's analysed: each moving channel is modelled as one or more repeating
+shapes, so layered shape generators with unrelated speeds keep looping correctly
+however long they run. 16-bit pairs are detected from the data. Channels that
+never repeat loop the whole take.
+
+How it plays: press a Dashboard pad (or send OSC). It fades in and out. Its moving
+channels override scenes on those channels (latest started sequence wins where two
+overlap); its still look joins the HTP merge like a scene. Several can run at once.
+All off stops sequences too; solo recalls stop them.
 
 ### Fixtures — the programmer
 An Avolites-style grid where each patched fixture (or dimmer-pack **head**) is a cell:
@@ -274,7 +315,8 @@ annotated template: [`config.example.jsonc`](config.example.jsonc).
     "channels": 512,
     "outputs": [                // nodes the Pi drives on failover ("port" optional)
       { "name": "Chauvet Net-X II", "ip": "10.10.20.1", "universes": [2, 3, 4, 5] },
-      { "name": "Botex Dimmer",     "ip": "10.10.20.2", "universes": [1] }
+      // "source": send ONE packet per update from this Pi address (see Botex below)
+      { "name": "Botex", "ip": "255.255.255.255", "source": "169.254.50.51", "universes": [0] }
     ]
   },
 
@@ -318,7 +360,11 @@ segment (legacy), or `0`.
 | `/scene/<id>/off` `[fade]` | turn scene `<id>` off (other layers hold their channels) |
 | `/scene/<id>/toggle` `[fade]` | flip scene `<id>` |
 | `/scene/<id>/play` `[fade]` | **solo** `<id>` — turn it on and all others off (full-look button) |
-| `/scenes/off` `[fade]` | fade every scene out |
+| `/scene/<id>/level` `<0–1 or 0–100>` `[fade]` | set scene `<id>` to a partial level (0 = off); what the dashboard faders send |
+| `/scenes/off` `[fade]` | fade every scene out (and any held desk look) |
+| `/sequence/<id>/on` · `/off` · `/toggle` `[fade]` | run / stop sequence `<id>` |
+| `/sequences/off` `[fade]` | stop every sequence (scenes untouched) |
+| `/hold/release` `[fade]` | crossfade out of the held desk look to whatever scenes are on |
 | `/output/on` · `/output/off` | enable / disable Pi output |
 | `/scene-setter/console-override` `<0\|1\|2>` | force console **0**=off · **1**=on · **2**=auto (default) |
 | `/state` | push all feedback to the targets now |
@@ -331,8 +377,11 @@ Pushed on change, on startup, and on a slow heartbeat so Companion always conver
 | --- | --- |
 | `/scene-setter/scene/<id>/active` | int `0`/`1`/`2` = off / on / fading (one per recorded scene) |
 | `/scene-setter/scene/<id>/fade-remaining` | float — seconds left in *that scene's* fade |
+| `/scene-setter/sequence/<id>/active` | int `0`/`1`/`2` = off / running / fading |
+| `/scene-setter/active-sequences` | comma-separated running sequence ids |
 | `/scene-setter/console-active` | int `0/1` — effective console-in-control state (override applied) |
 | `/scene-setter/console-override` | string `off` / `on` / `auto` |
+| `/scene-setter/holding` | int `0/1` — the desk went away and its last look is being held |
 | `/scene-setter/status` | `PRODUCTION_CONSOLE_ACTIVE` / `BUILDING_CONTROL_ACTIVE` |
 | `/scene-setter/active-scenes` | comma-separated on-scene ids |
 | `/scene-setter/pi-output` | int `0/1` |
@@ -346,8 +395,27 @@ Pushed on change, on startup, and on a slow heartbeat so Companion always conver
 
 ## Companion setup
 
-The included [Generic OSC](https://bitfocus.io/connections/generic-osc) module is
-all you need.
+### The Light It module (recommended)
+
+The app serves its own Companion module: open **Companion** in the web UI and
+press **Download module**, then in Companion choose **Modules → Import module
+package** and add a **Light It** connection with the Pi's IP and web port (8080).
+It brings actions with live scene/sequence dropdowns, feedbacks (on / fading /
+desk live / holding), its own variables (fade countdown, levels, names) and
+ready-made presets: per scene a toggle and a **solo toggle** (solo, or off if it's
+already on), a **Sequences** submenu, All off, desk status and override buttons. The
+same page lists every OSC command and feedback path. Importing a newer module
+package in Companion replaces the old one; existing buttons keep their actions.
+
+The module lives in `companion/`. `npm run build` (and the deploy script) builds
+`companion/lightit.tgz`, bumping the module's patch version whenever its source
+has changed since the last build (tracked in `companion/.build-fingerprint`);
+bump minor/major by hand in `companion/package.json`. Commit the version bump.
+
+### Raw OSC (Generic OSC module)
+
+Without the module, the included [Generic OSC](https://bitfocus.io/connections/generic-osc)
+module works too.
 
 1. **Connection** → *Generic: OSC* → Target `=` the Pi's IP, Target port `9000`,
    *Listen for Feedback* on, Source port `9001`.
@@ -382,6 +450,7 @@ variable). Names are `prefix` + the key below:
 | `<prefix>fade_active` | `0` / `1` |
 | `<prefix>console_active` | `0` / `1` |
 | `<prefix>console_override` | `off` / `on` / `auto` |
+| `<prefix>holding` | `0` / `1` — desk look held after the desk went away |
 | `<prefix>active_scenes` | comma-separated on-scene ids |
 | `<prefix>scene_<id>_fade_remaining` | that scene's own fade, 1 d.p. |
 
@@ -394,7 +463,7 @@ active at a time).
 ```
 Console ──┬──────────────► Node A  (e.g. universes 2-5)
           ├──────────────► Node B  (e.g. universe 1)
-          └──────────────► Pi Scene Setter  (records all universes)
+          └──────────────► Pi: Light It     (records all universes)
 
 Pi (on console loss) ────► Node A + Node B   (unicast, takes over)
 ```
@@ -410,52 +479,73 @@ On startup the Pi logs `Art-Net: receiving universe N from desk …` the first t
 it sees each universe — use that to confirm the numbering matches your patch (some
 consoles are 0-based, some 1-based).
 
-### Sending on a shared network (no lighting VLAN)
+### How outputs are sent
 
-Art-Net can share the building network with everything else, as long as it isn't
-broadcast. Each output's `ip` decides who receives the traffic — **Config → Art-Net →
-How outputs are sent** shows exactly how each saved output leaves the machine:
+Each output's `ip` (and optional `source`) decides who receives the traffic —
+**Config → Art-Net → How outputs are sent** shows exactly how each saved output
+leaves the machine:
 
-| `ip` | Mode | Who receives it |
+| Output | Mode | What goes on the wire |
 | --- | --- | --- |
-| the node's own IP | direct (unicast) | only that node — **use this whenever you can** |
-| the node's network broadcast, e.g. `169.254.255.255` | subnet broadcast | every device on that network |
-| blank or `255.255.255.255` | broadcast | every device on the network |
+| `ip` = the node's own IP | direct (unicast) | one packet, only that node receives it — **use this whenever you can** |
+| `ip` = a network's broadcast, e.g. `10.10.20.255` | subnet broadcast | one packet to every device on that network |
+| `ip` blank or `255.255.255.255` | broadcast | from **every** Pi address, to both `255.255.255.255` and that address's subnet broadcast — the widest net, for finding out what a node accepts |
+| `ip` + `source` (a Pi address) | one packet | exactly one packet from that address to `ip`, nothing else — for nodes that only accept one form |
 
-Broadcasts are one packet per universe per update — once a second when idle, up to
-25/s during fades — and every device (including Wi-Fi clients) has to receive
-them, so treat them as a way to get started, then switch to the node's own IP.
+Updates go once a second when idle, ~25/s during fades and ~50/s while a sequence
+runs (530 bytes each). All Art-Net is sent from port 6454.
 
-All Art-Net is sent from port 6454, out of the network port that faces the node
-(on a Mac with Wi-Fi and a USB Ethernet adapter, broadcasts otherwise only ever
-leave via Wi-Fi).
+### Art-Net on its own VLAN
 
-### Nodes that give themselves a 169.254.x.x address (Botex DPX NET)
+A node with no IP (like the Botex below) can only be reached by broadcast, so keep
+that broadcast off the production network with a VLAN rather than fighting it:
 
-Some nodes have no IP setting: they self-assign a link-local `169.254.x.x` address,
-never answer ArtPoll, and **only accept Art-Net addressed to `169.254.255.255`** —
-`255.255.255.255` and the building subnet's broadcast are ignored. The Botex
-DPX-1210T NET behaves like this. To drive one:
+- **Art-Net VLAN** (e.g. VLAN 20): the node's switch port has it as the native
+  (untagged) network, with tagged VLANs blocked. The desk's Art-Net port joins it too.
+- **The Pi's switch port**: native = the production network (for the web UI and
+  Companion), plus the Art-Net VLAN **tagged**. On the Pi that's a VLAN interface
+  (NetworkManager, e.g. `eth0.20`) — broadcasts sent from it stay on the Art-Net VLAN.
+- On other device ports, set tagged VLANs to **Block All**, but keep them allowed on
+  uplinks between switches, access points and the Pi's port.
 
-1. On the node: set its Art-Net SubNet/Universe, and (Botex) **SETUP → Protocol
-   Assign** each channel to **A** — confirm with ENTER; ESC or a 5 s timeout discards.
-2. The sender needs an address in `169.254.0.0/16` on the port the node is cabled
-   to. `scripts/deploy.sh` adds `169.254.50.50/16` to the Pi's main port (alongside
-   its DHCP address, saved in NetworkManager); override with
-   `LINK_LOCAL_ADDR=169.254.x.y/16` or disable with `LINK_LOCAL_ADDR=none`.
-3. Set the output's IP to `169.254.255.255` — then, better, find the node's own
-   address and use that:
+Broadcasts never cross VLANs or routers: every sender and receiver of Art-Net
+broadcast has to be on the same VLAN. See [`docs/VENUE.md`](docs/VENUE.md) for the
+Assembly Rooms setup.
 
-   ```bash
-   node scripts/find-devices.js            # scans every 169.254 range we're on (~4 min)
-   node scripts/find-devices.js 192.168.1.0/24
-   ```
+### Botex DPX NET dimmers (no IP address)
 
-   It lists every device that answers ARP (IP + MAC), which includes nodes that
-   ignore everything else. Run it on the Pi (`node /opt/scene-setter/current/scripts/find-devices.js`).
+The Botex DPX-1210T NET has no IP settings and, in testing, **no usable IP address**:
+it never answers ArtPoll, doesn't announce an address when it powers up, doesn't
+answer ARP anywhere in `169.254.0.0/16`, and isn't on DHCP. It is driven purely by
+broadcast, and it's picky about the form. Tested one packet form at a time with the
+app stopped, watching the lamps (Sep 2026):
 
-The lighting desk has the same constraint: to reach such a node it too needs a
-169.254.x.x address on its network port (or use the node's own IP once known).
+| Sender → destination | Botex |
+| --- | --- |
+| a 169.254.x.x address → `255.255.255.255` | **responds** |
+| a 169.254.x.x address → `169.254.255.255` | ignored |
+| a normal LAN address → `255.255.255.255` | ignored |
+| a normal LAN address → its subnet broadcast | ignored |
+
+So it takes the limited broadcast, but only from a sender with a link-local
+(169.254) address, from port 6454. To drive one:
+
+1. On the dimmer: set its Art-Net SubNet/Universe, and **SETUP → Protocol Assign**
+   each channel to **A** — confirm with ENTER; ESC or a 5 s timeout discards.
+2. Give the Pi a `169.254.x.x/16` address on the network the Botex is on — ideally a
+   VLAN interface on an Art-Net VLAN (above). Without one, `scripts/deploy.sh` adds
+   `169.254.50.50/16` to the Pi's main port (saved in NetworkManager; skipped if the
+   Pi already has a 169.254 address anywhere; override with
+   `LINK_LOCAL_ADDR=169.254.x.y/16`, disable with `LINK_LOCAL_ADDR=none`).
+3. Output: `ip` `255.255.255.255`, `source` = that 169.254 address, universe as set
+   on the dimmer. One packet per update, on that network only.
+
+`scripts/find-devices.js` finds nodes that answer ARP (a range sweep) or announce
+themselves at power-up (`--listen`, needs tcpdump + sudo) — useful for other kit, but
+it can't find a Botex, which does neither.
+
+The lighting desk has the same constraint: to reach a Botex it must also send
+`255.255.255.255` from a 169.254.x.x address on the Art-Net network.
 
 ## Terminal Art-Net monitor
 
@@ -489,6 +579,12 @@ point an output at its IP.
   `/scene-setter/console-active`, or force `console-override` to `0` for testing.
 - **A node won't light on failover** — confirm it accepts Art-Net from the Pi's IP
   and the universe numbers match; watch `journalctl -u scene-setter -f`.
+- **See exactly what the Pi sends** — `sudo tcpdump -n -i any udp port 6454` on the Pi
+  (interface, source → destination per packet).
+- **Botex stopped responding** — it needs `255.255.255.255` from a 169.254.x.x source
+  on the network it's plugged into: check the output's `source` exists on the Pi
+  (`ip -4 addr`) and that the dimmer's switch port is on the same VLAN as that
+  interface. Config → Art-Net warns when the `source` address isn't on the Pi.
 
 ## Notes & limitations
 

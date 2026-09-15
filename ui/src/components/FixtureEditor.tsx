@@ -62,7 +62,7 @@ function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
 // ── primitives ──────────────────────────────────────────────────────────────
 export function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-border/60 bg-card/50 p-3">
+    <div className="flex flex-col gap-2 rounded-xl border border-white/[0.08] bg-white/[0.03] p-3 shadow-[inset_0_1px_0_hsl(0_0%_100%/0.04)]">
       <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         {title}
       </div>

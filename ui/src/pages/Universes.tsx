@@ -34,9 +34,9 @@ export function Universes() {
       </div>
 
       {Array.from({ length: universes }, (_, u) => (
-        <Card key={u}>
+        <Card key={u} className="glow-live">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-normal text-muted-foreground">Universe {u}</CardTitle>
+            <CardTitle>Universe {u}</CardTitle>
           </CardHeader>
           <CardContent className="overflow-x-auto p-3 pt-0">
             <UniverseGrid universe={u} channels={channels} patch={patch} />

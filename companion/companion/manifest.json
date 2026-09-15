@@ -1,0 +1,34 @@
+{
+  "$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
+  "id": "lightit",
+  "name": "lightit",
+  "shortname": "Light It",
+  "description": "Control Light It — house lighting scenes, sequences and desk failover — with live status feedback.",
+  "version": "1.0.1",
+  "license": "MIT",
+  "repository": "git+https://github.com/assemble-church/lx-scene-setter.git",
+  "bugs": "https://github.com/assemble-church/lx-scene-setter/issues",
+  "maintainers": [
+    {
+      "name": "Assemble Church"
+    }
+  ],
+  "runtime": {
+    "type": "node22",
+    "api": "nodejs-ipc",
+    "apiVersion": "0.0.0",
+    "entrypoint": "../src/main.js"
+  },
+  "legacyIds": [],
+  "manufacturer": "Light It",
+  "products": [
+    "Light It"
+  ],
+  "keywords": [
+    "lighting",
+    "art-net",
+    "dmx",
+    "scenes",
+    "house lights"
+  ]
+}

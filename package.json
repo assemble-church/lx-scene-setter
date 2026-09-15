@@ -1,7 +1,7 @@
 {
   "name": "lx-scene-setter",
   "version": "1.0.0",
-  "description": "House-lighting controller with automatic Art-Net console failover, controlled over OSC (Companion).",
+  "description": "Light It: house lighting scenes, sequences and Art-Net desk failover, controlled from the web UI or Companion.",
   "main": "src/index.js",
   "bin": {
     "scene-setter": "src/index.js"
@@ -12,7 +12,9 @@
     "dev:engine": "node --watch src/index.js",
     "dev:ui": "npm --prefix ui run dev",
     "ui:build": "npm --prefix ui run build",
-    "build": "npm --prefix ui install && npm --prefix ui run build"
+    "build": "npm --prefix ui install && npm --prefix ui run build && npm run companion:build",
+    "test": "node test/sequence-analyse.test.js && node test/sequence-engine.test.js",
+    "companion:build": "node scripts/build-companion.js"
   },
   "engines": {
     "node": ">=18"

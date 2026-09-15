@@ -3,8 +3,8 @@
   "console": {
     "ip": "10.10.20.10",        // desk's IP — also the source filter for recording
     "timeoutMs": 1000,          // silence before the desk is considered "lost"
-    "defaultScene": "1",        // scene to recall on handoff if nothing else is on
-    "defaultFade": 3            // crossfade seconds on console handoff / startup
+    "defaultScene": "1",        // recalled at startup if nothing was on (losing the desk holds its last look instead)
+    "defaultFade": 3            // fade-up seconds for scenes restored at startup
   },
 
   // ── Art-Net / DMX network ────────────────────────────────────────────────
@@ -15,13 +15,15 @@
     "channels": 512,            // DMX channels per universe
     // Nodes we drive on failover ("port" optional). "ip" is, in order of preference:
     //   the node's own IP      — only that node receives the traffic
-    //   its subnet broadcast   — e.g. "169.254.255.255" for a node that self-assigns
-    //                            169.254.x.x (Botex DPX NET); needs a 169.254 address here
-    //   "" or 255.255.255.255  — every device on the network receives it
+    //   a subnet broadcast     — e.g. "10.10.20.255": every device on that network
+    //   "" or 255.255.255.255  — every device on every network the Pi is on
+    // "source" (optional): send exactly ONE packet per update, from this address of
+    // the Pi, to "ip". Use it for nodes that only accept one form — the Botex DPX NET
+    // has no IP and only takes 255.255.255.255 from a 169.254.x.x sender.
     // Universe = Art-Net Port-Address: Subnet 0/Universe 1 → 1, Subnet 1/Universe 0 → 16.
     "outputs": [
       { "name": "Chauvet Net-X II", "ip": "10.10.20.1", "port": 6454, "universes": [2, 3, 4, 5] },
-      { "name": "Botex Dimmer",     "ip": "169.254.255.255", "port": 6454, "universes": [0] }
+      { "name": "Botex", "ip": "255.255.255.255", "source": "169.254.50.51", "port": 6454, "universes": [0] }
     ]
   },
 

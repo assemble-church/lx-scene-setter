@@ -8,7 +8,14 @@
 // Once you know the device's IP, put it in the Art-Net output instead of a
 // broadcast address so only that device receives the traffic.
 //
+// Fastest, and silent on the network: --listen. A device that self-assigns a
+// 169.254.x.x address announces it with ARP when it powers up (RFC 3927), so
+// listen, then power-cycle the device — its IP and MAC appear within seconds.
+// Needs tcpdump (Pi: sudo apt install -y tcpdump) and root.
+//
 // Usage:
+//   sudo node scripts/find-devices.js --listen    # then power-cycle the device
+//   sudo node scripts/find-devices.js --listen eth0
 //   node scripts/find-devices.js                  # every 169.254.x.x range we have an address in
 //   node scripts/find-devices.js 192.168.1.0/24   # any range one of our interfaces is on
 //   node scripts/find-devices.js 169.254.0.0/16 --rate=300
@@ -20,7 +27,64 @@ const dgram = require("dgram");
 const os = require("os");
 const { execFileSync } = require("child_process");
 
+const { spawn } = require("child_process");
+
 const args = process.argv.slice(2);
+
+// ---- --listen: watch ARP for addresses being claimed / announced --------------
+if (args.includes("--listen")) {
+  const nics = Object.entries(os.networkInterfaces())
+    .filter(([, a]) => (a || []).some((x) => x.family === "IPv4" && !x.internal))
+    .map(([n]) => n);
+  const dev = args.find((a) => !a.startsWith("-")) || nics.find((n) => /^(eth|en)/.test(n)) || nics[0];
+  if (!dev) {
+    console.error("No network interface to listen on.");
+    process.exit(1);
+  }
+  console.log(`Listening for ARP on ${dev}. Power-cycle the device now (Ctrl+C to stop).\n`);
+  const seen = new Map(); // ip → mac
+  const td = spawn("tcpdump", ["-l", "-n", "-e", "-i", dev, "arp"], { stdio: ["ignore", "pipe", "pipe"] });
+  td.on("error", (e) => {
+    console.error(e.code === "ENOENT" ? "tcpdump isn't installed. On the Pi: sudo apt install -y tcpdump" : e.message);
+    process.exit(1);
+  });
+  td.stderr.on("data", (d) => {
+    const t = String(d);
+    if (/permission|not permitted|You don't have/i.test(t)) console.error("tcpdump needs root: run with sudo.");
+  });
+  let buf = "";
+  td.stdout.on("data", (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      const mac = (line.match(/^\S+ ([0-9a-f]{2}(?::[0-9a-f]{2}){5}) >/i) || [])[1];
+      // Announcement / reply: "Reply 169.254.x.x is-at mac"  "Request who-has X tell 169.254.x.x"
+      // Probe (claiming an address, sender 0.0.0.0): "Request who-has 169.254.x.x tell 0.0.0.0"
+      const reply = line.match(/Reply (\d+\.\d+\.\d+\.\d+) is-at/);
+      const tell = line.match(/who-has (\d+\.\d+\.\d+\.\d+) (?:\(\S+\) )?tell (\d+\.\d+\.\d+\.\d+)/);
+      let ip = null;
+      let how = "";
+      if (reply) [ip, how] = [reply[1], "answered ARP"];
+      else if (tell && tell[2] === "0.0.0.0") [ip, how] = [tell[1], "probing to claim this address"];
+      else if (tell && tell[1] === tell[2]) [ip, how] = [tell[1], "announced its address"];
+      else if (tell) [ip, how] = [tell[2], "asked for another address"];
+      if (!ip || !ip.startsWith("169.254.") || !mac) continue;
+      const key = `${ip} ${mac}`;
+      if (seen.has(key)) continue;
+      seen.set(key, true);
+      console.log(`  ${ip}\t${mac}\t${how}`);
+    }
+  });
+  process.on("SIGINT", () => {
+    td.kill();
+    console.log(seen.size ? `\n${seen.size} link-local device(s) seen.` : "\nNo 169.254.x.x devices seen.");
+    process.exit(0);
+  });
+  return;
+}
+
 const rate = Number((args.find((a) => a.startsWith("--rate=")) || "--rate=250").split("=")[1]);
 const cidrArg = args.find((a) => /^\d+\.\d+\.\d+\.\d+\/\d+$/.test(a));
 
@@ -114,7 +178,9 @@ async function scan({ iface, net, size }) {
       for (let i = 0; i < perTick && next <= last; i++, next++) {
         if (toIp(next) !== self) sock.send(probe, 6454, toIp(next), () => {});
       }
-      if ((next - first) % (perTick * 40) < perTick) {
+      // Read the neighbour table often: on a big sweep the OS evicts old entries
+      // (the table holds ~1000 on Linux), so a reply can vanish if we wait.
+      if ((next - first) % (perTick * 10) < perTick) {
         collect();
         process.stdout.write(`  … ${Math.round(((next - first) / total) * 100)}%\r`);
       }

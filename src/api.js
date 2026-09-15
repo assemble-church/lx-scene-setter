@@ -18,6 +18,7 @@ const { buildFromText, buildConfig, loadGrouped, serializeConfig } = require("./
 const lib = require("./fixtures/library");
 const { importLibraryInWorker, sevenZipStatus } = require("./fixtures/import");
 const { CHANNEL_TYPES } = require("./db");
+const { buildModel, previewModel } = require("./sequences/model");
 
 // Coerce the numeric fields of a grouped config object (the form sends some as
 // strings). Mutates and returns the object.
@@ -54,6 +55,21 @@ function coerceConfigNumbers(g) {
 
 const ROOT = path.resolve(__dirname, "..");
 const UI_DIR = path.join(ROOT, "ui", "dist");
+// The Companion module package, built by `npm run build` (scripts/build-companion.js).
+const COMPANION_DIR = path.join(ROOT, "companion");
+const COMPANION_PKG = path.join(COMPANION_DIR, "lightit.tgz");
+
+// Module version + whether a package is available to download.
+function companionModuleInfo() {
+  let version = null;
+  try {
+    version = JSON.parse(fs.readFileSync(path.join(COMPANION_DIR, "package.json"), "utf8")).version;
+  } catch (_) {
+    /* not shipped */
+  }
+  const available = fs.existsSync(COMPANION_PKG);
+  return { version, available, size: available ? fs.statSync(COMPANION_PKG).size : 0, file: `companion-module-lightit-${version || "latest"}.tgz` };
+}
 
 const MIME = {
   ".html": "text/html",
@@ -66,7 +82,7 @@ const MIME = {
   ".woff2": "font/woff2",
 };
 
-function createApi(config, logger, engine, artnetIn) {
+function createApi(config, logger, engine, artnetIn, recorder) {
   // Lazily-opened fixture library (only if a fixtures.db exists).
   let db = null;
   let libCount = 0;
@@ -124,7 +140,7 @@ function createApi(config, logger, engine, artnetIn) {
 
   // The full snapshot pushed to clients = engine state + fixtures/import status.
   function snapshot() {
-    return { ...engine.getState(), fixtures: fixturesStatus() };
+    return { ...engine.getState(), fixtures: fixturesStatus(), artnetSenders: artnetIn ? artnetIn.getSenders() : [] };
   }
 
   const server = http.createServer((req, res) => {
@@ -132,6 +148,39 @@ function createApi(config, logger, engine, artnetIn) {
 
     if (url === "/api/health") return sendJson(res, { ok: true });
     if (url === "/api/state") return sendJson(res, snapshot());
+
+    // ---- Companion ----
+    // GET /api/companion/state — the compact snapshot the Companion module polls.
+    if (url === "/api/companion/state" && req.method === "GET") {
+      const s = engine.getState();
+      const pick = (x) => ({ id: x.id, label: x.label, on: x.on, state: x.state, level: x.level, fadeRemaining: x.fadeRemaining });
+      return sendJson(res, {
+        app: "Light It",
+        desk: { live: s.consoleActive, holding: s.holding, override: s.consoleOverride, detected: s.desk.detected, ip: s.desk.ip },
+        output: s.controllerOutput,
+        locked: s.consoleActive || !!s.editing || !!s.programmerActive,
+        fade: s.fade,
+        scenes: s.scenes.map(pick),
+        sequences: s.sequences.map(pick),
+      });
+    }
+    // GET /api/companion/module — module version / download availability.
+    if (url === "/api/companion/module" && req.method === "GET") {
+      return sendJson(res, companionModuleInfo());
+    }
+    // GET /companion/lightit.tgz — the module package, for Companion's "Import module".
+    if (url === "/companion/lightit.tgz" && (req.method === "GET" || req.method === "HEAD")) {
+      const info = companionModuleInfo();
+      if (!info.available) return badRequest(res, "Companion module not built — run npm run build", 404);
+      res.writeHead(200, {
+        "Content-Type": "application/gzip",
+        "Content-Disposition": `attachment; filename="${info.file}"`,
+        "Content-Length": info.size,
+        "Cache-Control": "no-cache",
+      });
+      if (req.method === "HEAD") return void res.end();
+      return void fs.createReadStream(COMPANION_PKG).pipe(res);
+    }
 
     // POST /api/command { address, args } — routed through the same handler as OSC,
     // so the UI drives scenes exactly like a Companion button does.
@@ -160,6 +209,88 @@ function createApi(config, logger, engine, artnetIn) {
         if (!ok) return badRequest(res, `scene ${id} not found`, 404);
         sendJson(res, { ok: true });
       });
+    }
+
+    // POST /api/scenes/<id>/favourite { favourite } — pin/unpin on the dashboard.
+    const favMatch = url.match(/^\/api\/scenes\/([^/]+)\/favourite$/);
+    if (favMatch && req.method === "POST") {
+      const id = decodeURIComponent(favMatch[1]);
+      return readBody(req, res, (b) => {
+        const ok = engine.setSceneFavourite(id, !!b.favourite);
+        if (!ok) return badRequest(res, `scene ${id} not found`, 404);
+        sendJson(res, { ok: true });
+      });
+    }
+
+    // ---- Sequences ----
+    // POST /api/sequences/record/start { autoStop? } — begin capturing the desk.
+    if (url === "/api/sequences/record/start" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        try {
+          recorder.start({ autoStop: b.autoStop !== false });
+          sendJson(res, { ok: true });
+        } catch (err) {
+          badRequest(res, err.message);
+        }
+      });
+    }
+    // POST /api/sequences/record/stop — stop and analyse; resolves with the draft summary.
+    if (url === "/api/sequences/record/stop" && req.method === "POST") {
+      recorder
+        .stop()
+        .then((draft) => sendJson(res, { ok: true, draft }))
+        .catch((err) => badRequest(res, err.message));
+      return;
+    }
+    // POST /api/sequences/record/auto-stop { autoStop }
+    if (url === "/api/sequences/record/auto-stop" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        recorder.setAutoStop(!!b.autoStop);
+        sendJson(res, { ok: true });
+      });
+    }
+    // POST /api/sequences/record/discard — throw away the take / draft.
+    if (url === "/api/sequences/record/discard" && req.method === "POST") {
+      recorder.discard();
+      return sendJson(res, { ok: true });
+    }
+    // POST /api/sequences { label, groups?: string[], includeStill? } — save the reviewed draft.
+    if (url === "/api/sequences" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        const draft = recorder.getDraft();
+        if (!draft) return badRequest(res, "No recorded sequence to save");
+        const model = buildModel(draft, {
+          groups: Array.isArray(b.groups) ? b.groups.map(String) : undefined,
+          includeStill: b.includeStill !== false,
+        });
+        if (!model.motion.length && !model.still.length) return badRequest(res, "Nothing selected to save");
+        const id = engine.createSequence(typeof b.label === "string" ? b.label.trim() : "", model);
+        recorder.discard();
+        sendJson(res, { ok: true, id });
+      });
+    }
+    const seqLabel = url.match(/^\/api\/sequences\/([^/]+)\/label$/);
+    if (seqLabel && req.method === "POST") {
+      const id = decodeURIComponent(seqLabel[1]);
+      return readBody(req, res, (b) => {
+        if (!engine.setSequenceLabel(id, typeof b.label === "string" ? b.label : "")) {
+          return badRequest(res, `sequence ${id} not found`, 404);
+        }
+        sendJson(res, { ok: true });
+      });
+    }
+    // GET /api/sequences/<id>/preview — effect shapes for the loop dials.
+    const seqPreview = url.match(/^\/api\/sequences\/([^/]+)\/preview$/);
+    if (seqPreview && req.method === "GET") {
+      const model = engine.getSequenceModel(decodeURIComponent(seqPreview[1]));
+      if (!model) return badRequest(res, "sequence not found", 404);
+      return sendJson(res, previewModel(model));
+    }
+    const seqOne = url.match(/^\/api\/sequences\/([^/]+)$/);
+    if (seqOne && req.method === "DELETE") {
+      const id = decodeURIComponent(seqOne[1]);
+      if (!engine.deleteSequence(id)) return badRequest(res, `sequence ${id} not found`, 404);
+      return sendJson(res, { ok: true });
     }
 
     // GET/POST /api/scenes/<id>/raw — read or replace the stored { label, data }.
@@ -638,7 +769,7 @@ function createApi(config, logger, engine, artnetIn) {
     if (!fs.existsSync(UI_DIR)) {
       res.writeHead(200, { "Content-Type": "text/html" });
       return res.end(
-        "<h1>LX Scene Setter</h1><p>UI not built. Run <code>npm run ui:build</code>.</p>"
+        "<h1>Light It</h1><p>UI not built. Run <code>npm run ui:build</code>.</p>"
       );
     }
     const rel = url === "/" ? "index.html" : url.replace(/^\/+/, "");

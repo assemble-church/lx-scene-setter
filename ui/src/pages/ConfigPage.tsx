@@ -53,7 +53,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-base">{title}</CardTitle>
+        <CardTitle>{title}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-1">{children}</CardContent>
     </Card>
@@ -163,14 +163,16 @@ export function ConfigPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Config</h1>
         <div className="flex items-center gap-2">
-          <div className="mr-2 flex rounded-md border border-border p-0.5 text-sm">
+          <div className="mr-2 flex rounded-lg border border-white/10 bg-white/[0.03] p-0.5 text-sm">
             {(["form", "raw"] as const).map((m) => (
               <button
                 key={m}
                 onClick={() => switchTo(m)}
                 className={cn(
-                  "rounded px-3 py-1 capitalize",
-                  mode === m ? "bg-accent text-accent-foreground" : "text-muted-foreground"
+                  "rounded-md px-3 py-1 capitalize transition-colors",
+                  mode === m
+                    ? "bg-white/[0.08] text-foreground shadow-[inset_0_1px_0_hsl(0_0%_100%/0.06)]"
+                    : "text-muted-foreground hover:text-foreground"
                 )}
               >
                 {m}
@@ -187,12 +189,12 @@ export function ConfigPage() {
       </div>
 
       {error && (
-        <div className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {error}
         </div>
       )}
       {notice && !error && (
-        <div className="flex items-center gap-3 rounded-md border border-border bg-accent/40 px-3 py-2 text-sm">
+        <div className="flex items-center gap-3 rounded-lg border border-live/30 bg-live/10 px-3 py-2 text-sm">
           {notice}
           {savedNeedsRestart && (
             <Button size="sm" onClick={restart} disabled={busy}>
@@ -232,14 +234,14 @@ export function ConfigPage() {
                   onChange={(v) => patch("console", { timeoutMs: v })}
                 />
               </Row>
-              <Row label="Default scene" hint="recalled on handoff">
+              <Row label="Startup scene" hint="recalled at boot if nothing was on">
                 <Input
                   value={cfg.console.defaultScene}
                   onChange={(e) => patch("console", { defaultScene: e.target.value })}
                   className="max-w-24"
                 />
               </Row>
-              <Row label="Default fade (s)">
+              <Row label="Startup fade (s)" hint="losing the desk holds its look">
                 <NumInput
                   value={cfg.console.defaultFade}
                   onChange={(v) => patch("console", { defaultFade: v })}
@@ -340,6 +342,19 @@ export function ConfigPage() {
                         }
                         className="h-8 w-32"
                       />
+                      <Input
+                        placeholder="send from: auto"
+                        title="Optional: send only from this address of this machine, one packet per update (e.g. 169.254.50.51 on the Art-Net VLAN for a Botex). Blank = automatic."
+                        value={o.source ?? ""}
+                        onChange={(e) =>
+                          patch("artnet", {
+                            outputs: cfg.artnet.outputs.map((x, idx) =>
+                              idx === i ? { ...x, source: e.target.value } : x
+                            ),
+                          })
+                        }
+                        className="h-8 w-36"
+                      />
                       <Button
                         size="sm"
                         variant={o.ip === BROADCAST_IP ? "secondary" : "outline"}
@@ -402,7 +417,7 @@ export function ConfigPage() {
                     {o.universes.length > 0 && (
                       <div className="pl-1 text-[11px] text-muted-foreground">
                         {o.universes.map((u) => `U${u} = ${portAddressLabel(u)}`).join("  ·  ")}
-                        {(!o.ip.trim() || o.ip === BROADCAST_IP) && "  —  broadcast to all nodes (no IP needed)"}
+                        {(!o.ip.trim() || o.ip === BROADCAST_IP) && (o.source?.trim() ? `  —  one broadcast, sent from ${o.source.trim()}` : "  —  broadcast to all nodes (no IP needed)")}
                       </div>
                     )}
                     </div>

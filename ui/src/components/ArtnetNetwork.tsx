@@ -16,6 +16,7 @@ const MODE_TEXT: Record<ArtnetOutputRoute["mode"], { label: string; detail: stri
   "subnet-broadcast": { label: "subnet broadcast", detail: "every device on that network receives it", tone: "warning" },
   broadcast: { label: "broadcast", detail: "every device on the network receives it", tone: "warning" },
   routed: { label: "via router", detail: "not on a local network", tone: "secondary" },
+  fixed: { label: "one packet", detail: "sent only from the chosen address", tone: "secondary" },
 };
 
 const ago = (t: number) => {
@@ -50,7 +51,7 @@ export function ArtnetNetwork({ onAdd, port }: { onAdd: (node: OutputNode) => vo
   }
 
   return (
-    <div className="space-y-3 rounded-md border border-border/60 p-3">
+    <div className="space-y-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <div className="text-sm font-medium">Network</div>
@@ -75,7 +76,7 @@ export function ArtnetNetwork({ onAdd, port }: { onAdd: (node: OutputNode) => vo
             {net.outputs.map((o, i) => {
               const m = MODE_TEXT[o.mode];
               return (
-                <div key={i} className="rounded border border-border/50 px-2 py-1.5 text-sm">
+                <div key={i} className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-2 py-1.5 text-sm">
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                     <span className="font-medium">{o.name || "(unnamed)"}</span>
                     <span className="font-mono text-xs tabular-nums">{o.ip || "(blank)"}</span>
@@ -106,7 +107,7 @@ export function ArtnetNetwork({ onAdd, port }: { onAdd: (node: OutputNode) => vo
         {net?.nodes.length ? (
           <div className="space-y-1">
             {net.nodes.map((n) => (
-              <div key={`${n.ip}#${n.bindIndex}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-border/50 px-2 py-1.5 text-sm">
+              <div key={`${n.ip}#${n.bindIndex}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-white/[0.08] bg-white/[0.02] px-2 py-1.5 text-sm">
                 <span className="font-mono tabular-nums">{n.ip}</span>
                 <span className="font-medium">{n.shortName || n.longName || "(unnamed)"}</span>
                 {n.longName && n.longName !== n.shortName && <span className="text-xs text-muted-foreground">{n.longName}</span>}

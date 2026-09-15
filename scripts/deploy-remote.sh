@@ -55,6 +55,12 @@ if ! command -v 7zz >/dev/null && ! command -v 7z >/dev/null; then
   apt-get install -y -qq 7zip >/dev/null || apt-get install -y -qq p7zip-full >/dev/null
 fi
 
+# tcpdump: lets scripts/find-devices.js --listen spot devices that pick their own
+# address (the Botex) the moment they power up. Optional — never fails the deploy.
+if ! command -v tcpdump >/dev/null; then
+  apt-get install -y -qq tcpdump >/dev/null 2>&1 && echo "    tcpdump installed" || echo "    tcpdump not installed (no package source?) — find-devices --listen unavailable"
+fi
+
 # ---- Link-local address for self-addressed Art-Net devices --------------------
 # Some nodes (e.g. Botex DPX NET dimmers) give themselves a 169.254.x.x address and
 # only accept Art-Net sent to 169.254.255.255, which needs an address in that range
@@ -65,7 +71,11 @@ LINK_LOCAL_ADDR="${LINK_LOCAL_ADDR:-169.254.50.50/16}"
 if [ "$LINK_LOCAL_ADDR" != "none" ]; then
   LL_DEV="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
   LL_IP="${LINK_LOCAL_ADDR%/*}"
-  if [ -z "$LL_DEV" ]; then
+  if ip -4 addr show 2>/dev/null | grep -q "inet 169\.254\."; then
+    # Already has one somewhere (e.g. on the Art-Net VLAN interface, eth0.20):
+    # never add a second on the production network.
+    echo "    link-local: a 169.254.x.x address is already configured — skipped"
+  elif [ -z "$LL_DEV" ]; then
     echo "    link-local: no default-route interface found — skipped"
   else
     if command -v nmcli >/dev/null; then
@@ -166,7 +176,7 @@ fi
 log "Writing $UNIT"
 cat > "$UNIT" <<EOF
 [Unit]
-Description=Assembly Rooms Art-Net Scene Setter
+Description=Light It (Assembly Rooms house lighting)
 After=network-online.target
 Wants=network-online.target
 # Keep restarting however often it crashes (no start-rate limit).

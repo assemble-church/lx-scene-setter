@@ -1,0 +1,16 @@
+{
+  "name": "companion-module-lightit",
+  "version": "1.0.1",
+  "main": "src/main.js",
+  "license": "MIT",
+  "private": true,
+  "dependencies": {
+    "@companion-module/base": "~1.11.0"
+  },
+  "scripts": {
+    "package": "companion-module-build --output lightit"
+  },
+  "devDependencies": {
+    "@companion-module/tools": "^2.3.0"
+  }
+}

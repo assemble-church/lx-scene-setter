@@ -17,3 +17,9 @@ config.json
 
 # Avolites fixture library (proprietary, ~1 GB) — never commit.
 fixture_lib/
+
+# Companion module build output (served package + build tools). The version
+# bump and .build-fingerprint are committed.
+companion/node_modules/
+companion/pkg/
+companion/*.tgz

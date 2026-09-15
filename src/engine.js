@@ -10,12 +10,15 @@
 //     holding up; channels still held by another layer stay up. A channel stored
 //     as 0 in a layer never pulls anything down (max ignores it).
 //
-// console failover:
-//   - While the console console broadcasts Art-Net it owns the rig; the Pi stops
-//     outputting (piOutputEnabled = false) but still captures the desk's levels so
-//     a record snapshots what's on stage.
-//   - When the console falls silent past consoleTimeoutMs, the Pi takes over: it restores
-//     the layers that were on (fading them up), or the default scene if none.
+// Console failover (hold on fail):
+//   - While the console sends Art-Net it owns the rig; the Pi stops outputting
+//     (piOutputEnabled = false) but still captures the desk's levels — on every
+//     universe it sends — so a record snapshots what's on stage.
+//   - When the console falls silent past consoleTimeoutMs, the Pi takes over by
+//     HOLDING the desk's last look (the __desk__ layer) — no change on stage. It
+//     stays held until someone acts: any scene command (on/off/toggle/play, all
+//     off) or an explicit hold release crossfades out of it over that command's
+//     fade. The held look is persisted, so a restart mid-hold resumes the hold.
 //   - Scene control is BLOCKED while the console is live. Recording IS allowed.
 //
 // Channel types (per patched channel):
@@ -24,15 +27,36 @@
 //     Like a snap channel it comes on the instant its layer starts fading in and
 //     only goes off once the layer has fully faded out, so power is never cut while
 //     the lamps it feeds are still fading.
+//
+// Sequences (recorded chases/effects, see src/sequences/):
+//   - Each running sequence is a layer keyed "seq:<id>" with its own fade and a
+//     clock starting when it was switched on.
+//   - Its still channels (a lit look, e.g. blue house lights) join the HTP merge
+//     like a scene.
+//   - Its moving channels override whatever scenes put there (LTP), blended by
+//     the sequence's fade level. Where two sequences move the same channel, the one
+//     started last wins.
+//   - While any sequence runs, the render loop runs continuously.
+
+const { compileModel, motionValue, describeModel } = require("./sequences/model");
 
 const now = () => Date.now();
 
 const SNAP = 1;
 const SWITCH = 2;
 const SWITCH_ON_AT = 128;
+// Universes grow on demand (a desk sending a higher universe, a scene or output
+// using one) up to this many — all of Art-Net Net 0. Bounded so one stray packet
+// can't make every render frame walk thousands of empty universes.
+const MAX_UNIVERSES = 256;
+// Frame interval while a sequence is running (smooth movement needs more than fades do).
+const SEQUENCE_FRAME_MS = 20;
+// Layer-id prefix for sequences, so they share the layer machinery with scenes.
+const SEQ = "seq:";
+const isSeq = (id) => id.startsWith(SEQ);
 
-function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
-  const U = config.universes;
+function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }) {
+  let U = config.universes; // grows via ensureUniverses()
   const C = config.channels;
   const companion = config.companion || { customVariables: false };
 
@@ -49,13 +73,17 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
   // Computed output buffer (HTP merge of active layers). In memory only.
   const current = Array.from({ length: U }, () => new Uint8Array(C));
 
-  // Recorded looks: scenes[id] = { label, data } where data is array(U) of
+  // Recorded looks: scenes[id] = { label, favourite, data } where data is array(U) of
   // arrays(C), values 0..255.
   const scenes = db.loadScenes();
 
   function saveScene(id) {
     db.saveScene(id, scenes[id]);
   }
+
+  // Recorded sequences: sequences[id] = { label, created, model, compiled }.
+  const sequences = db.loadSequences();
+  for (const id of Object.keys(sequences)) sequences[id].compiled = compileModel(sequences[id].model);
 
   // Patch — fixtures placed at addresses. Each entry carries resolved per-channel
   // `fade` and `types` arrays (from its personality + user overrides), so the engine
@@ -111,12 +139,48 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     source: null, // scene id being edited, when loaded from a scene
   };
 
+  // Grow every per-universe buffer so universes 0..n-1 exist. Returns false (and
+  // logs once) past MAX_UNIVERSES.
+  let warnedMaxUniverses = false;
+  function ensureUniverses(n) {
+    if (n <= U) return true;
+    if (n > MAX_UNIVERSES) {
+      if (!warnedMaxUniverses) {
+        warnedMaxUniverses = true;
+        logger.warn(`Universe ${n - 1} ignored — only universes 0–${MAX_UNIVERSES - 1} are supported`);
+      }
+      return false;
+    }
+    for (let u = U; u < n; u++) {
+      current.push(new Uint8Array(C));
+      snapMap.push(new Uint8Array(C));
+      editor.buf.push(new Uint8Array(C));
+      programmer.buf.push(new Uint8Array(C));
+      programmer.touched.push(new Uint8Array(C));
+    }
+    logger.info(`Universes: now handling 0–${n - 1}`);
+    U = n;
+    compileSnapMap(); // patch entries on the new universes now apply
+    return true;
+  }
+  // Start with enough universes for everything already configured or stored.
+  ensureUniverses(
+    Math.max(
+      U,
+      ...Object.values(scenes).map((s) => (s.data || []).length),
+      ...Object.values(sequences).map((s) => s.compiled.universes),
+      ...(config.outputs || []).flatMap((o) => o.universes || []).map((u) => u + 1),
+      ...patch.fixtures.map((f) => (f.universe | 0) + 1)
+    )
+  );
+
   // Runtime layer state per scene id:
   //   { level: 0..1, target: 0|1, fadeFrom: 0..1, fadeStart: ms, fadeDur: ms }
   const layers = {};
 
   // Persisted: which scene ids were on (restored on boot).
   const persistedActive = db.getActiveScenes();
+  const persistedSequences = db.getActiveSequences();
   const state = {
     consoleActive: false, // effective state (override applied) — drives behaviour & feedback
     consoleDetected: false, // raw network detection (packets + watchdog)
@@ -124,6 +188,16 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     piOutputEnabled: true,
     lastConsolePacket: 0,
     activeScenes: persistedActive.filter((id) => scenes[id]),
+    activeSequences: persistedSequences.filter((id) => sequences[id]),
+  };
+
+  // Desk-traffic stats for the dashboard (updated on the DMX hot path: counters only).
+  const desk = {
+    packets: 0, // total ArtDMX from the console IP since start
+    rate: 0, // packets/s over the last second
+    rateCount: 0,
+    universes: new Map(), // universe → last packet time
+    firstSeen: 0,
   };
 
   let renderTimer = null;
@@ -150,36 +224,48 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
 
   function ensureLayer(id) {
     if (!layers[id]) {
-      layers[id] = { level: 0, target: 0, fadeFrom: 0, fadeStart: 0, fadeDur: 0 };
+      layers[id] = { level: 0, target: 0, fadeFrom: 0, fadeStart: 0, fadeDur: 0, startedAt: now() };
     }
     return layers[id];
   }
 
-  // Internal fade-out-only layer holding the desk's last output, used to crossfade
-  // FROM the desk look INTO the building look on console handoff. Not a real scene, so
-  // it never appears in scenes feedback / active-scenes / persistence.
+  // Internal layer holding the desk's last output after the desk goes away (hold on
+  // fail). Not a real scene, so it never appears in scene feedback / active scenes.
   const DESK_LAYER = "__desk__";
 
-  function captureDeskLayer(fadeSeconds) {
-    const dur = Math.max(0, Number(fadeSeconds) || 0) * 1000;
-    if (dur === 0) {
-      delete layers[DESK_LAYER]; // instant handoff — nothing to crossfade from
-      return;
-    }
+  // Hold a look (default: the desk's last frame) at full, instantly. Persisted so a
+  // restart mid-hold comes back holding the same look.
+  function holdLook(values) {
     const L = ensureLayer(DESK_LAYER);
-    L.values = current.map((u) => Uint8Array.from(u)); // snapshot the desk's last frame
+    L.values = values || current.map((u) => Uint8Array.from(u));
     L.level = 1;
-    L.target = 0;
+    L.target = 1;
     L.fadeFrom = 1;
     L.fadeStart = now();
-    L.fadeDur = dur;
+    L.fadeDur = 0;
+    db.setHeldLook(L.values);
   }
 
-  // Begin moving a layer toward on (1) or off (0) over fadeSeconds.
+  function isHolding() {
+    return !!layers[DESK_LAYER] && layers[DESK_LAYER].target === 1;
+  }
+
+  // Crossfade out of the held look. No-op when nothing is held.
+  function releaseHold(fadeSeconds) {
+    if (!isHolding()) return false;
+    setLayer(DESK_LAYER, false, fadeSeconds);
+    db.setHeldLook(null);
+    event("console", `Released held desk look${Number(fadeSeconds) ? ` (${Number(fadeSeconds)}s)` : ""}`);
+    return true;
+  }
+
+  // Begin moving a layer toward a target over fadeSeconds. `on` is true/false
+  // (full / off) or a number 0..1 for a partial level (the dashboard faders).
+  // Any target above 0 counts as "on" for intent, feedback and persistence.
   function setLayer(id, on, fadeSeconds, fromLevel) {
     const L = ensureLayer(id);
     if (fromLevel !== undefined) L.level = fromLevel;
-    L.target = on ? 1 : 0;
+    L.target = typeof on === "number" ? Math.min(1, Math.max(0, on)) : on ? 1 : 0;
     L.fadeFrom = L.level;
     L.fadeStart = now();
     L.fadeDur = Math.max(0, Number(fadeSeconds) || 0) * 1000;
@@ -210,11 +296,39 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     }
   }
 
-  // Scene ids that are on by intent (target = 1), sorted.
+  // Scene ids that are on by intent (target = 1), sorted. Excludes the held desk look.
   function onIds() {
     return Object.keys(layers)
-      .filter((id) => layers[id].target === 1)
+      .filter((id) => id !== DESK_LAYER && !isSeq(id) && layers[id].target > 0)
       .sort(cmpIds);
+  }
+
+  // Sequence ids that are on by intent, sorted.
+  function seqOnIds() {
+    return Object.keys(layers)
+      .filter((id) => isSeq(id) && layers[id].target > 0)
+      .map((id) => id.slice(SEQ.length))
+      .sort(cmpIds);
+  }
+
+  // Every scene and sequence layer that's on — what the editor/programmer stash
+  // and bring back.
+  function liveLayerIds() {
+    return Object.keys(layers).filter((id) => id !== DESK_LAYER && layers[id].target > 0);
+  }
+
+  // Bring stashed layers back on instantly (sequences restart from their top).
+  function restoreLayers(ids) {
+    for (const id of ids) {
+      if (isSeq(id) ? !sequences[id.slice(SEQ.length)] : !scenes[id]) continue;
+      if (isSeq(id) && layers[id] && layers[id].level === 0) layers[id].startedAt = now();
+      setLayer(id, true, 0);
+    }
+  }
+
+  // A sequence layer is contributing (fading in, running, or fading out).
+  function sequenceRunning() {
+    return Object.keys(layers).some((id) => isSeq(id) && (layers[id].level > 0 || layers[id].target > 0));
   }
 
   // ---------------- RENDER (HTP) ----------------
@@ -222,10 +336,11 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
   function renderToCurrent() {
     for (let u = 0; u < U; u++) current[u].fill(0);
     for (const id of Object.keys(layers)) {
+      if (isSeq(id)) continue; // applied after the scenes, below
       const L = layers[id];
       // A layer fading in (target on) counts as on for snap/switch channels from
       // its very first frame, even while its level is still exactly 0.
-      const on = L.level > 0 || L.target === 1;
+      const on = L.level > 0 || L.target > 0;
       if (!on) continue;
       const vals = L.values || (scenes[id] && scenes[id].data); // desk layer carries its own snapshot
       if (!vals) continue;
@@ -245,6 +360,47 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
         }
       }
     }
+    applySequences(now());
+  }
+
+  // Sequences on top of the scene merge: stills HTP, then movement LTP in start order.
+  function applySequences(t) {
+    const running = Object.keys(layers)
+      .filter((id) => isSeq(id) && (layers[id].level > 0 || layers[id].target > 0) && sequences[id.slice(SEQ.length)])
+      .map((id) => ({ L: layers[id], seq: sequences[id.slice(SEQ.length)].compiled }))
+      .sort((a, b) => a.L.startedAt - b.L.startedAt);
+    if (!running.length) return;
+    for (const { L, seq } of running) {
+      const lvl = L.level;
+      for (let i = 0; i < seq.stillV.length; i++) {
+        const u = seq.stillU[i];
+        const ch = seq.stillCh[i];
+        if (u >= U || ch >= C) continue;
+        const raw = seq.stillV[i];
+        const v = snapMap[u][ch] ? raw : lvl >= 1 ? raw : Math.round(raw * lvl);
+        if (v > current[u][ch]) current[u][ch] = v;
+      }
+    }
+    for (const { L, seq } of running) {
+      const lvl = L.level;
+      const at = (t - L.startedAt) / 1000;
+      for (const m of seq.motion) {
+        if (m.u >= U) continue;
+        const dst = current[m.u];
+        const v = motionValue(m, at);
+        if (m.wide) {
+          if (m.ch + 1 >= C) continue;
+          const cur = dst[m.ch] * 256 + dst[m.ch + 1];
+          const out = lvl >= 1 ? v : Math.round(cur + (v - cur) * lvl);
+          dst[m.ch] = out >> 8;
+          dst[m.ch + 1] = out & 255;
+        } else {
+          if (m.ch >= C) continue;
+          // Snap channels (colour wheels, gobos…) take the sequence value outright.
+          dst[m.ch] = lvl >= 1 || snapMap[m.u][m.ch] ? v : Math.round(dst[m.ch] + (v - dst[m.ch]) * lvl);
+        }
+      }
+    }
   }
 
   function outputAll() {
@@ -254,7 +410,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
       const ip = (node.ip || "").trim() || "255.255.255.255"; // no IP → broadcast
       for (const universe of node.universes) {
         if (universe >= U) continue;
-        output.sendUniverse(ip, port, universe, current[universe]);
+        output.sendUniverse(ip, port, universe, current[universe], (node.source || "").trim() || undefined);
       }
     }
   }
@@ -283,7 +439,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     outputAll();
   }
 
-  // Run a frame loop only while something is fading.
+  // Run a frame loop while something is fading or a sequence is running.
   function scheduleRender() {
     if (renderTimer) return;
     const tick = () => {
@@ -297,18 +453,19 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
       // settle transition (fading → on/off) the instant it happens so a scene
       // that finishes while another is still fading updates immediately.
       for (const id of Object.keys(layers)) {
-        if (!scenes[id]) continue;
+        const emit = isSeq(id) ? (sequences[id.slice(SEQ.length)] ? () => emitSequence(id.slice(SEQ.length)) : null) : scenes[id] ? () => emitScene(id) : null;
+        if (!emit) continue;
         const L = layers[id];
         if (L.level !== L.target) {
           L.wasFading = true;
-          if (throttle) emitScene(id);
+          if (throttle) emit();
         } else if (L.wasFading) {
           L.wasFading = false;
-          emitScene(id);
+          emit();
         }
       }
-      if (anyFading()) {
-        renderTimer = setTimeout(tick, config.fadeFrameMs);
+      if (anyFading() || sequenceRunning()) {
+        renderTimer = setTimeout(tick, frameMs());
       } else {
         renderTimer = null;
         cleanupLayers();
@@ -316,7 +473,11 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
         broadcastScenes();
       }
     };
-    renderTimer = setTimeout(tick, config.fadeFrameMs);
+    renderTimer = setTimeout(tick, frameMs());
+  }
+
+  function frameMs() {
+    return sequenceRunning() ? Math.min(SEQUENCE_FRAME_MS, config.fadeFrameMs) : config.fadeFrameMs;
   }
 
   function stopRender() {
@@ -331,7 +492,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     renderAndOutput();
     broadcastTop();
     broadcastScenes();
-    if (anyFading()) scheduleRender();
+    if (anyFading() || sequenceRunning()) scheduleRender();
     emitFade();
   }
 
@@ -350,6 +511,8 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
       },
     ]);
     sendOsc("/scene-setter/active-scenes", [{ type: "s", value: onIds().join(",") }]);
+    sendOsc("/scene-setter/active-sequences", [{ type: "s", value: seqOnIds().join(",") }]);
+    pushVar("active_sequences", seqOnIds().join(","), "s");
     pushVar("console_active", state.consoleActive ? 1 : 0, "i");
     pushVar("active_scenes", onIds().join(","), "s");
     // Editor lock: which scene is being live-edited ("" = none). While set, OSC
@@ -358,6 +521,10 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     pushVar("editing", editor.active ? String(editor.sceneId) : "", "s");
     sendOsc("/scene-setter/programmer", [{ type: "i", value: programmer.active ? 1 : 0 }]);
     pushVar("programmer", programmer.active ? 1 : 0, "i");
+    // Holding the desk's last look after the desk went away (1) — press a scene to take over.
+    const holding = !state.consoleActive && isHolding();
+    sendOsc("/scene-setter/holding", [{ type: "i", value: holding ? 1 : 0 }]);
+    pushVar("holding", holding ? 1 : 0, "i");
   }
 
   // Tri-state per scene: 0 = off, 1 = on (settled), 2 = fading (in or out).
@@ -367,7 +534,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     const L = layers[id];
     if (!L) return 0;
     if (L.level !== L.target) return 2;
-    return L.target === 1 ? 1 : 0;
+    return L.target > 0 ? 1 : 0;
   }
 
   // Seconds left in this scene's own fade (0 if it isn't fading).
@@ -386,6 +553,12 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
 
   function broadcastScenes() {
     for (const id of Object.keys(scenes)) emitScene(id);
+    for (const id of Object.keys(sequences)) emitSequence(id);
+  }
+
+  // Same tri-state as scenes, on /scene-setter/sequence/<id>/active.
+  function emitSequence(id) {
+    sendOsc(`/scene-setter/sequence/${id}/active`, [{ type: "i", value: sceneState(SEQ + id) }]);
   }
 
   // Aggregate fade status across all fading layers (longest wins for the counter).
@@ -423,6 +596,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
 
   function persist() {
     db.setActiveScenes(onIds());
+    db.setActiveSequences(seqOnIds());
   }
 
   // ---------------- CONSOLE FAILOVER ----------------
@@ -434,8 +608,15 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     return state.consoleDetected;
   }
 
-  function recomputeConsole() {
-    applyConsoleActive(effectiveConsole());
+  // `reason` (optional) says why, for the activity log: "detected" | "lost".
+  function recomputeConsole(reason) {
+    const active = effectiveConsole();
+    if (reason && state.consoleActive === active) {
+      // Detection changed but the override pins the effective state: still worth a line.
+      const pinned = state.consoleOverride === "off" ? "override is OFF, desk ignored" : "override is ON, desk stays in control";
+      event("console", reason === "detected" ? `Desk detected at ${config.consoleIp} (${pinned})` : `Desk Art-Net stopped (${pinned})`);
+    }
+    applyConsoleActive(active, reason);
   }
 
   // mode: "on" (force live) | "off" (force ignore desk) | "auto" (network detection)
@@ -447,29 +628,35 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     broadcastTop(); // always publish the override + effective state
   }
 
-  function applyConsoleActive(active) {
+  function applyConsoleActive(active, reason) {
     if (state.consoleActive === active) return;
     state.consoleActive = active;
 
     if (active) {
-      stopRender(); // desk takes over; stop controller rendering (levels/targets are kept)
+      stopRender(); // desk takes over; stop controller rendering
       state.piOutputEnabled = false;
-      event("console", "Console live — desk in control, controller output off");
+      // Whatever the Pi was holding or playing is superseded by the desk's look.
+      db.setHeldLook(null);
+      event(
+        "console",
+        reason === "detected"
+          ? `Desk detected at ${config.consoleIp}: desk in control, Pi output off`
+          : "Desk forced live: desk in control, Pi output off"
+      );
       broadcastState();
     } else {
       state.piOutputEnabled = true;
-      // Crossfade FROM the desk's last look (captured) INTO the building look —
-      // the building layers rise from 0 while the desk snapshot falls, so there's
-      // no flash to black.
-      captureDeskLayer(config.defaultFadeOnConsoleLost);
-      const restore = onIds();
-      if (restore.length === 0 && scenes[config.defaultSceneOnConsoleLost]) {
-        event("console", `Console lost — crossfading to default scene ${config.defaultSceneOnConsoleLost}`);
-        setLayer(config.defaultSceneOnConsoleLost, true, config.defaultFadeOnConsoleLost, 0);
-      } else {
-        event("console", `Console lost — crossfading to scene(s) ${restore.join(", ")}`);
-        for (const id of restore) setLayer(id, true, config.defaultFadeOnConsoleLost, 0);
-      }
+      // Hold on fail: keep outputting exactly what the desk last sent. Any scenes
+      // from before the desk took over are dropped so they can't mix into the hold;
+      // the next scene command crossfades out of the held look.
+      for (const id of Object.keys(layers)) if (id !== DESK_LAYER) delete layers[id];
+      holdLook();
+      event(
+        "console",
+        reason === "lost"
+          ? `Desk lost (no Art-Net for ${(config.consoleTimeoutMs / 1000).toFixed(1)}s): Pi took over, holding the desk's last look`
+          : "Desk ignored: Pi took over, holding the desk's last look"
+      );
       persist();
       commit();
     }
@@ -478,14 +665,22 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
   // Hot path: NO disk writes. While the console is live, current holds desk levels but
   // outputAll is suppressed (piOutputEnabled = false).
   function onDmx(universe, packet, length) {
-    state.lastConsolePacket = now();
+    const t = now();
+    state.lastConsolePacket = t;
+    desk.packets++;
+    desk.rateCount++;
+    if (!desk.firstSeen) desk.firstSeen = t;
+    desk.universes.set(universe, t);
+    if (recorder) recorder.onFrame(universe, packet, length); // sequence recording, whoever is in control
     if (!state.consoleDetected) {
       state.consoleDetected = true;
-      recomputeConsole();
+      recomputeConsole("detected");
     }
     // If the effective console state is off (e.g. forced off), ignore the desk's data
     // entirely — don't let it corrupt the Pi's own render.
     if (!state.consoleActive) return;
+    // Capture every universe the desk sends (growing the buffers on first sight).
+    if (universe >= U && !ensureUniverses(universe + 1)) return;
 
     const n = Math.min(length, C, packet.length - 18);
     const buf = current[universe];
@@ -510,7 +705,8 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
       return;
     }
     const label = scenes[id] ? scenes[id].label : "";
-    scenes[id] = { label, data: current.map((u) => Array.from(u)) };
+    const favourite = scenes[id] ? !!scenes[id].favourite : false;
+    scenes[id] = { label, favourite, data: current.map((u) => Array.from(u)) };
     saveScene(id);
     event("record", `Recorded scene ${id}`);
     sendOsc("/scene-setter/recorded", [{ type: "s", value: String(id) }]);
@@ -527,7 +723,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
   // Create an empty scene (no data until recorded) with a label. Returns its id.
   function createScene(label) {
     const id = nextSceneId();
-    scenes[id] = { label: typeof label === "string" ? label : "", data: [] };
+    scenes[id] = { label: typeof label === "string" ? label : "", favourite: false, data: [] };
     saveScene(id);
     event("scene", `Created scene ${id}${scenes[id].label ? ` "${scenes[id].label}"` : ""}`);
     broadcastScenes();
@@ -539,6 +735,14 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     scenes[id].label = typeof label === "string" ? label : "";
     db.setSceneLabel(id, scenes[id].label);
     broadcastScenes();
+    return true;
+  }
+
+  // Favourites are pinned to the dashboard console.
+  function setSceneFavourite(id, favourite) {
+    if (!scenes[id]) return false;
+    scenes[id].favourite = !!favourite;
+    db.setSceneFavourite(id, scenes[id].favourite);
     return true;
   }
 
@@ -566,7 +770,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     }
     const label = typeof obj.label === "string" ? obj.label : "";
     if (!Array.isArray(obj.data)) throw new Error("`data` must be an array of universes");
-    if (obj.data.length > U) throw new Error(`Too many universes (max ${U})`);
+    if (obj.data.length > MAX_UNIVERSES) throw new Error(`Too many universes (max ${MAX_UNIVERSES})`);
     const data = obj.data.map((row, u) => {
       if (!Array.isArray(row)) throw new Error(`data[${u}] must be an array of channel values`);
       if (row.length > C) throw new Error(`data[${u}] has too many channels (max ${C})`);
@@ -578,7 +782,8 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
         return n;
       });
     });
-    scenes[id] = { label, data };
+    ensureUniverses(data.length);
+    scenes[id] = { label, favourite: !!scenes[id].favourite, data };
     saveScene(id);
     if (layers[id]) commit(); // re-render if live
     else broadcastScenes();
@@ -589,6 +794,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     if (state.consoleActive) return void consoleBlocked(`Scene ${id} ${on ? "on" : "off"}`);
     if (!scenes[id]) return void sceneMissing(id);
     if (on) state.piOutputEnabled = true;
+    releaseHold(fade); // taking control: crossfade out of any held desk look
     setLayer(id, on, fade);
     event("scene", `Scene ${id} ${on ? "on" : "off"}${Number(fade) ? ` (${Number(fade)}s)` : ""}`);
     persist();
@@ -605,8 +811,26 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
 
   function sceneToggle(id, fade) {
     const L = layers[id];
-    const isOn = !!L && L.target === 1;
+    const isOn = !!L && L.target > 0;
     setSceneState(id, !isOn, fade);
+  }
+
+  // Set a scene's level directly (0..1) — the dashboard faders. 0 turns it off,
+  // anything above 0 turns it on at that level. Only logs when the on/off intent
+  // changes, so dragging a fader doesn't flood the activity log.
+  function sceneSetLevel(id, level, fade) {
+    if (state.consoleActive) return void consoleBlocked(`Scene ${id} level`);
+    if (!scenes[id]) return void sceneMissing(id);
+    const lvl = Math.min(1, Math.max(0, Number(level) || 0));
+    const wasOn = !!layers[id] && layers[id].target > 0;
+    if (lvl > 0) state.piOutputEnabled = true;
+    releaseHold(fade);
+    setLayer(id, lvl, fade);
+    if (wasOn !== lvl > 0) {
+      event("scene", `Scene ${id} ${lvl > 0 ? `on at ${Math.round(lvl * 100)}%` : "off"} (fader)`);
+    }
+    persist();
+    commit();
   }
 
   // Exclusive recall ("full look"): this scene on, all others off.
@@ -614,6 +838,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     if (state.consoleActive) return void consoleBlocked(`Solo scene ${id}`);
     if (!scenes[id]) return void sceneMissing(id);
     state.piOutputEnabled = true;
+    releaseHold(fade);
     for (const other of Object.keys(layers)) {
       if (other !== String(id)) setLayer(other, false, fade);
     }
@@ -624,10 +849,87 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
   }
 
   function scenesOff(fade) {
+    if (state.consoleActive) return void consoleBlocked("All scenes off");
+    releaseHold(fade);
     for (const id of Object.keys(layers)) setLayer(id, false, fade);
-    event("scenes", `All scenes off${Number(fade) ? ` (${Number(fade)}s)` : ""}`);
+    event("scenes", `All scenes and sequences off${Number(fade) ? ` (${Number(fade)}s)` : ""}`);
     persist();
     commit();
+  }
+
+  // ---------------- SEQUENCE COMMANDS ----------------
+
+  function sequenceMissing(id) {
+    logger.warn(`Sequence ${id} does not exist`);
+    sendOsc("/scene-setter/error", [{ type: "s", value: `Sequence ${id} does not exist` }]);
+  }
+
+  function setSequenceState(id, on, fade) {
+    id = String(id);
+    if (state.consoleActive) return void consoleBlocked(`Sequence ${id} ${on ? "on" : "off"}`);
+    if (!sequences[id]) return void sequenceMissing(id);
+    const key = SEQ + id;
+    if (on) {
+      state.piOutputEnabled = true;
+      // From the top, unless it's still visible (e.g. re-fired mid fade-out).
+      const L = layers[key];
+      if (!L || L.level === 0) ensureLayer(key).startedAt = now();
+    }
+    releaseHold(fade);
+    setLayer(key, on, fade);
+    event("sequence", `Sequence ${id} ${on ? "on" : "off"}${Number(fade) ? ` (${Number(fade)}s)` : ""}`);
+    persist();
+    commit();
+  }
+
+  function sequenceToggle(id, fade) {
+    const L = layers[SEQ + id];
+    setSequenceState(id, !(L && L.target > 0), fade);
+  }
+
+  function sequencesOff(fade) {
+    if (state.consoleActive) return void consoleBlocked("All sequences off");
+    for (const id of Object.keys(layers)) if (isSeq(id)) setLayer(id, false, fade);
+    event("sequence", `All sequences off${Number(fade) ? ` (${Number(fade)}s)` : ""}`);
+    persist();
+    commit();
+  }
+
+  function nextSequenceId() {
+    let n = 1;
+    while (sequences[String(n)]) n++;
+    return String(n);
+  }
+
+  // Save a stored model (from the recorder's reviewed draft) as a new sequence.
+  function createSequence(label, model) {
+    const id = nextSequenceId();
+    const created = now();
+    const compiled = compileModel(model);
+    ensureUniverses(compiled.universes);
+    db.insertSequence(id, { label, created, model });
+    sequences[id] = { label: label || "", created, model, compiled };
+    event("sequence", `Saved sequence ${id}${label ? ` "${label}"` : ""}`);
+    broadcastScenes();
+    return id;
+  }
+
+  function setSequenceLabel(id, label) {
+    if (!sequences[id]) return false;
+    sequences[id].label = typeof label === "string" ? label : "";
+    db.setSequenceLabel(id, sequences[id].label);
+    return true;
+  }
+
+  function deleteSequence(id) {
+    if (!sequences[id]) return false;
+    delete layers[SEQ + id];
+    delete sequences[id];
+    db.deleteSequence(id);
+    persist();
+    event("sequence", `Deleted sequence ${id}`);
+    commit();
+    return true;
   }
 
   // ---------------- OUTPUT MASTER ----------------
@@ -671,11 +973,43 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
       if (verb === "off") return void sceneOff(id, fade);
       if (verb === "toggle") return void sceneToggle(id, fade);
       if (verb === "play") return void sceneSolo(id, fade); // exclusive recall
+      // /scene/<id>/level <0..1 | 0..100> [fade]
+      if (verb === "level") {
+        const args = (msg.args || []).map((a) => (a && typeof a === "object" ? a.value : a));
+        let lvl = Number(args[0]);
+        if (!Number.isFinite(lvl)) lvl = Number(parts[3]);
+        if (!Number.isFinite(lvl)) return;
+        if (lvl > 1) lvl /= 100; // accept percent too
+        const f = Number(args[1]);
+        return void sceneSetLevel(id, lvl, Number.isFinite(f) ? f : 0);
+      }
     }
 
-    // /scenes/off [fade]  → all layers off
+    // /sequence/<id>/on|off|toggle [fade]
+    if (cmd === "sequence") {
+      const id = parts[1];
+      const verb = parts[2];
+      const fade = resolveFade(msg, parts[3]);
+      if (verb === "on") return void setSequenceState(id, true, fade);
+      if (verb === "off") return void setSequenceState(id, false, fade);
+      if (verb === "toggle") return void sequenceToggle(id, fade);
+    }
+
+    // /sequences/off [fade] → every sequence off, scenes untouched
+    if (cmd === "sequences" && parts[1] === "off") {
+      return void sequencesOff(resolveFade(msg, parts[2]));
+    }
+
+    // /scenes/off [fade]  → all layers off (scenes and sequences)
     if (cmd === "scenes" && parts[1] === "off") {
       return void scenesOff(resolveFade(msg, parts[2]));
+    }
+
+    // /hold/release [fade] → crossfade out of the held desk look to whatever scenes are on
+    if (cmd === "hold" && parts[1] === "release") {
+      if (state.consoleActive) return void consoleBlocked("Hold release");
+      if (releaseHold(resolveFade(msg, parts[2]))) commit();
+      return;
     }
 
     // /scene-setter/console-override  arg 0=off, 1=on, 2/none=auto
@@ -730,31 +1064,50 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
       if (!state.consoleDetected) return;
       if (now() - state.lastConsolePacket >= config.consoleTimeoutMs) {
         state.consoleDetected = false;
-        recomputeConsole();
+        recomputeConsole("lost");
       }
     }, 100);
 
     const keepAlive = setInterval(outputAll, config.keepAliveMs);
+
+    // Desk packet rate, sampled once a second.
+    const deskRate = setInterval(() => {
+      desk.rate = desk.rateCount;
+      desk.rateCount = 0;
+    }, 1000);
 
     const feedbackHeartbeat = setInterval(broadcastState, config.feedbackHeartbeatMs);
 
     // On boot, wait briefly for the console to announce itself before lighting up.
     const startupTimer = setTimeout(() => {
       if (state.consoleActive) {
-        logger.info("Startup: console detected, desk in control");
+        event("console", "Started: desk already sending, desk in control");
+        return;
+      }
+      // Restarted while holding the desk's last look → keep holding it.
+      const held = db.getHeldLook();
+      if (held) {
+        const unis = held.length;
+        if (unis > U) ensureUniverses(Math.min(unis, MAX_UNIVERSES));
+        event("console", "Started: no desk, Pi in control, resuming the held desk look");
+        holdLook(held);
+        commit();
         return;
       }
       const restore = state.activeScenes.filter((id) => scenes[id]);
-      if (restore.length) {
-        logger.info(`Startup: no console, restoring scenes [${restore.join(",")}]`);
+      const restoreSeq = state.activeSequences.filter((id) => sequences[id]);
+      if (restore.length || restoreSeq.length) {
+        const what = [restore.length && `scenes ${restore.join(", ")}`, restoreSeq.length && `sequences ${restoreSeq.join(", ")}`].filter(Boolean).join(" and ");
+        event("console", `Started: no desk, Pi in control, restoring ${what}`);
         for (const id of restore) setLayer(id, true, config.defaultFadeOnConsoleLost, 0);
+        for (const id of restoreSeq) setLayer(SEQ + id, true, config.defaultFadeOnConsoleLost, 0);
         commit();
       } else if (scenes[config.defaultSceneOnConsoleLost]) {
-        logger.info(`Startup: no console, recalling default scene ${config.defaultSceneOnConsoleLost}`);
+        event("console", `Started: no desk, Pi in control, recalling default scene ${config.defaultSceneOnConsoleLost}`);
         setLayer(config.defaultSceneOnConsoleLost, true, config.defaultFadeOnConsoleLost, 0);
         commit();
       } else {
-        logger.info("Startup: no console, and no scene to recall yet");
+        event("console", "Started: no desk, Pi in control (no scene to recall yet)");
       }
     }, config.startupGraceMs);
 
@@ -763,6 +1116,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     return function stop() {
       clearInterval(watchdog);
       clearInterval(keepAlive);
+      clearInterval(deskRate);
       clearInterval(feedbackHeartbeat);
       clearTimeout(startupTimer);
       stopRender();
@@ -793,17 +1147,51 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
       consoleActive: state.consoleActive,
       consoleOverride: state.consoleOverride,
       controllerOutput: state.piOutputEnabled,
+      holding: !state.consoleActive && isHolding(),
+      desk: {
+        ip: config.consoleIp,
+        timeoutMs: config.consoleTimeoutMs,
+        detected: state.consoleDetected, // packets arriving (override not applied)
+        lastPacketAgoMs: state.lastConsolePacket ? now() - state.lastConsolePacket : null,
+        packetsPerSec: desk.rate,
+        packets: desk.packets,
+        // Universes heard from the desk, with how long since each last arrived.
+        universes: [...desk.universes.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([u, t]) => ({ universe: u, agoMs: now() - t })),
+      },
       activeScenes: ids,
       scenes: Object.keys(scenes)
         .sort(cmpIds)
         .map((id) => ({
           id,
           label: scenes[id].label,
-          on: onSet.has(id), // intent (target on) — drives the Activate/Deactivate label
+          favourite: !!scenes[id].favourite,
+          on: onSet.has(id), // intent (target > 0) — drives the Activate/Deactivate label
           state: sceneState(id), // 0 off / 1 on / 2 fading
           level: Math.round(sceneLevel(id) * 100) / 100,
+          target: layers[id] ? Math.round(layers[id].target * 100) / 100 : 0, // where the fader is heading
           fadeRemaining: round1(sceneFadeRemaining(id)),
         })),
+      activeSequences: seqOnIds(),
+      sequences: Object.keys(sequences)
+        .sort(cmpIds)
+        .map((id) => {
+          const key = SEQ + id;
+          return {
+            id,
+            label: sequences[id].label,
+            created: sequences[id].created,
+            on: !!layers[key] && layers[key].target > 0,
+            state: sceneState(key),
+            level: Math.round(sceneLevel(key) * 100) / 100,
+            fadeRemaining: round1(sceneFadeRemaining(key)),
+            // Where it is in its loops: ms since it started (null when not playing).
+            elapsedMs: layers[key] && (layers[key].level > 0 || layers[key].target > 0) ? now() - layers[key].startedAt : null,
+            ...describeModel(sequences[id].model),
+          };
+        }),
+      recording: recorder ? recorder.status() : null,
       fade: { active: f.active, remaining: round1(f.remaining), total: round1(f.total) },
       log: activityLog.slice(-60),
     };
@@ -823,7 +1211,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     if (!scenes[sceneId]) return false;
     // Stash whatever was live so we can restore it on exit. Only on first entry —
     // a "revert" re-calls editBegin while already editing and must not clobber it.
-    if (!editor.active) editor.restore = onIds();
+    if (!editor.active) editor.restore = liveLayerIds();
     stopRender();
     const data = scenes[sceneId].data || [];
     for (let u = 0; u < U; u++) {
@@ -864,6 +1252,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     if (!editor.active || !scenes[editor.sceneId]) return false;
     scenes[editor.sceneId] = {
       label: scenes[editor.sceneId].label,
+      favourite: !!scenes[editor.sceneId].favourite,
       data: editor.buf.map((u) => Array.from(u)),
     };
     saveScene(editor.sceneId);
@@ -882,10 +1271,9 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     // Restore whatever scenes were live before editing: stop the edited scene
     // (and anything else), bring the stashed scenes back on.
     for (const id of Object.keys(layers)) if (id !== DESK_LAYER) setLayer(id, false, 0);
-    for (const id of restore) if (scenes[id]) setLayer(id, true, 0);
+    restoreLayers(restore);
     persist();
-    renderAndOutput();
-    broadcastState();
+    commit();
     return true;
   }
 
@@ -901,7 +1289,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
         programmer.buf[u].set(current[u]);
         programmer.touched[u].fill(1);
       }
-      programmer.restore = onIds();
+      programmer.restore = liveLayerIds();
       for (const id of Object.keys(layers)) if (id !== DESK_LAYER) setLayer(id, false, 0);
       programmer.active = true;
       if (!state.consoleActive) state.piOutputEnabled = true;
@@ -926,7 +1314,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     id = String(id);
     if (!scenes[id]) return false;
     if (!programmer.active) {
-      programmer.restore = onIds();
+      programmer.restore = liveLayerIds();
       for (const l of Object.keys(layers)) if (l !== DESK_LAYER) setLayer(l, false, 0);
       programmer.active = true;
       if (!state.consoleActive) state.piOutputEnabled = true;
@@ -958,10 +1346,9 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     }
     // Restore whatever scenes were live before the programmer took over.
     for (const id of Object.keys(layers)) if (id !== DESK_LAYER) setLayer(id, false, 0);
-    for (const id of restore) if (scenes[id]) setLayer(id, true, 0);
+    restoreLayers(restore);
     persist();
-    renderAndOutput();
-    broadcastState();
+    commit();
     return true;
   }
   // Save the current programmer look into a scene (existing id, or a new one).
@@ -1027,9 +1414,14 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw }) {
     editEnd,
     createScene,
     setSceneLabel,
+    setSceneFavourite,
     deleteScene,
     getSceneRaw,
     setSceneRaw,
+    createSequence,
+    setSequenceLabel,
+    deleteSequence,
+    getSequenceModel: (id) => (sequences[id] ? sequences[id].model : null),
   };
 }
 

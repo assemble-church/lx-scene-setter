@@ -1,5 +1,5 @@
 [Unit]
-Description=Assembly Rooms Art-Net Scene Setter
+Description=Light It (Assembly Rooms house lighting)
 After=network-online.target
 Wants=network-online.target
 # Always restart, however fast it crashes (no start-rate limit).

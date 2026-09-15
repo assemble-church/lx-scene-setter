@@ -7,7 +7,7 @@
 #         (default target: pi@ac-production-pi-1.local, or $DEPLOY_TARGET)
 #
 # What it does:
-#   1. builds the web UI here (ui/dist)
+#   1. builds the web UI here (ui/dist) and the Companion module (companion/lightit.tgz)
 #   2. bundles the app (source, lockfile, built UI) and copies it to the Pi
 #   3. runs scripts/deploy-remote.sh on the Pi as root, which installs the
 #      release, keeps config + data untouched, runs migrations (if any), switches
@@ -39,6 +39,9 @@ if [ ! -f ui/node_modules/.package-lock.json ] || [ ui/package-lock.json -nt ui/
 fi
 npm --prefix ui run build
 
+echo "==> Building Companion module"
+node scripts/build-companion.js
+
 # ---- 2. Bundle + copy --------------------------------------------------------
 # One SSH connection shared by every step, so the password is only asked once.
 CTL_DIR="$(mktemp -d /tmp/deploy.XXXXXX)" # short path: macOS caps socket paths at 104 bytes
@@ -51,7 +54,7 @@ trap cleanup EXIT
 # Open the shared master connection up front (background, no command).
 ssh "${SSH_OPTS[@]}" -o ControlMaster=yes -o ConnectTimeout=15 -fN "$TARGET"
 
-FILES=(src package.json package-lock.json config.example.jsonc artnet-monitor.js README.md LICENSE ui/dist scripts/deploy-remote.sh scripts/find-devices.js)
+FILES=(src package.json package-lock.json config.example.jsonc artnet-monitor.js README.md LICENSE ui/dist companion/package.json companion/lightit.tgz scripts/deploy-remote.sh scripts/find-devices.js)
 
 echo "==> Copying bundle to $TARGET:$REMOTE_STAGE"
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --exclude .DS_Store -czf - "${FILES[@]}" \

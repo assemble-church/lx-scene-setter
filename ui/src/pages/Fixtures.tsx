@@ -719,10 +719,13 @@ export function Fixtures() {
                 else setMenu(null);
               }}
               className={cn(
-                "relative aspect-square overflow-hidden rounded-lg border text-center transition-colors",
-                it ? "border-border bg-card" : "border-border/60 bg-card/40",
+                "relative aspect-square overflow-hidden rounded-xl border text-center transition-all",
+                it
+                  ? "border-white/10 bg-gradient-to-b from-white/[0.07] to-white/[0.02] shadow-[inset_0_1px_0_hsl(0_0%_100%/0.05),0_8px_20px_-14px_hsl(0_0%_0%/0.9)] hover:from-white/[0.1]"
+                  : "border-dashed border-white/[0.06] bg-white/[0.015]",
                 moving != null ? "cursor-pointer hover:border-primary" : it && "cursor-context-menu hover:border-primary",
-                (moving === cell || selected) && "ring-2 ring-primary"
+                (moving === cell || selected) &&
+                  "border-primary/60 ring-2 ring-primary shadow-[0_0_20px_-6px_hsl(var(--primary))]"
               )}
             >
               <span className="absolute left-1 top-0.5 z-10 text-[8px] tabular-nums text-muted-foreground/50">
@@ -753,7 +756,7 @@ export function Fixtures() {
           const top = hover.y + 170 > H ? hover.y - 176 : hover.y + 6;
           return (
             <div
-              className="pointer-events-none fixed z-50 w-56 rounded-md border border-border bg-popover p-3 text-xs shadow-xl"
+              className="glass-pop pop-in pointer-events-none fixed z-50 w-56 rounded-lg p-3 text-xs"
               style={{ left, top }}
             >
               <div className="mb-1.5 flex items-center gap-2">
@@ -795,11 +798,11 @@ export function Fixtures() {
             }}
           />
           <div
-            className="fixed z-50 min-w-32 rounded-md border border-border bg-popover p-1 shadow-lg"
+            className="glass-pop pop-in fixed z-50 min-w-32 rounded-lg p-1"
             style={{ left: menu.x, top: menu.y }}
           >
             <button
-              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent/50"
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-white/[0.08]"
               onClick={() => {
                 setMoving(menu.cell);
                 setMenu(null);
@@ -808,7 +811,7 @@ export function Fixtures() {
               <Move className="h-4 w-4" /> Move
             </button>
             <button
-              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent/50"
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-white/[0.08]"
               onClick={() => {
                 const it = byCell.get(menu.cell);
                 setMenu(null);
@@ -824,18 +827,18 @@ export function Fixtures() {
       {/* Programmer — sweeps up from the bottom over the grid */}
       {sheetItems && (
         <>
-          <div className="fixed inset-y-0 left-56 right-0 z-40 bg-black/40" onClick={closeProgrammer} />
+          <div className="fade-in fixed inset-y-0 left-[var(--sidebar-w)] right-0 z-40 bg-black/50 backdrop-blur-[2px]" onClick={closeProgrammer} />
           <div
-            className="fixed bottom-0 left-56 right-0 z-50 flex h-[80vh] flex-col rounded-t-2xl border-t border-border bg-background shadow-2xl transition-transform duration-300 ease-out"
+            className="glass-pop fixed bottom-0 left-[var(--sidebar-w)] right-0 z-50 flex h-[80vh] flex-col rounded-t-2xl border-x-0 border-b-0 transition-transform duration-300 ease-out"
             style={{ transform: sheetShown ? "translateY(0)" : "translateY(100%)" }}
           >
-            <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
+            <div className="flex h-12 shrink-0 items-center justify-between border-b border-white/5 px-4">
               <div className="flex items-center gap-2">
                 <FixtureIcon kind={sheetItems[0].icon} className="h-5 w-5 text-foreground" />
                 <span className="font-semibold">
                   {sheetItems.length === 1 ? sheetItems[0].label : `${sheetItems.length} fixtures`}
                 </span>
-                <span className="text-xs text-muted-foreground">programmer</span>
+                <span className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">programmer</span>
               </div>
               <Button variant="ghost" size="sm" onClick={closeProgrammer}>
                 <X className="h-4 w-4" /> Close
@@ -884,7 +887,7 @@ export function Fixtures() {
                   Was live when you started
                 </div>
                 {topScenes.map((s) => (
-                  <div key={s.id} className="flex items-center justify-between rounded border border-primary/40 bg-primary/5 px-3 py-1.5">
+                  <div key={s.id} className="flex items-center justify-between rounded-lg border border-primary/40 bg-primary/10 px-3 py-1.5 shadow-[0_0_16px_-8px_hsl(var(--primary))]">
                     <span className="truncate text-sm">
                       <span className="mr-2 text-xs text-muted-foreground">#{s.id}</span>
                       {s.label || `Scene ${s.id}`}
@@ -903,7 +906,7 @@ export function Fixtures() {
               </div>
               <div className="max-h-64 space-y-1 overflow-auto">
                 {restScenes.map((s) => (
-                  <div key={s.id} className="flex items-center justify-between rounded border border-border/50 px-3 py-1.5">
+                  <div key={s.id} className="flex items-center justify-between rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5">
                     <span className="truncate text-sm">
                       <span className="mr-2 text-xs text-muted-foreground">#{s.id}</span>
                       {s.label || `Scene ${s.id}`}

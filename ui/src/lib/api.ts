@@ -5,10 +5,80 @@ export type SceneState = 0 | 1 | 2; // off | on | fading
 export interface SceneStatus {
   id: string;
   label: string;
-  on: boolean; // intent (target on) — drives the Activate/Deactivate label
+  favourite: boolean; // pinned to the dashboard console
+  on: boolean; // intent (target > 0) — drives the Activate/Deactivate label
   state: SceneState;
   level: number; // 0..1 live output level
+  target: number; // 0..1 where the level is heading (the fader position)
   fadeRemaining: number; // seconds left in this scene's fade
+}
+
+// A recorded chase/effect, looped by the engine.
+export interface SequenceStatus {
+  id: string;
+  label: string;
+  created: number; // epoch ms
+  on: boolean;
+  state: SceneState;
+  level: number;
+  fadeRemaining: number;
+  groups: number;
+  periods: number[]; // seconds, one per repeating group
+  movingChannels: number;
+  stillLit: number; // lit still channels it brings with it
+  universes: number[];
+  irregular: boolean; // has channels that loop the whole take
+  elapsedMs: number | null; // position in its loops (ms since it started); null when not playing
+}
+
+// Effect shapes for the loop dials: per effect, its period and a few channels'
+// shapes over one pass (0..1).
+export interface SequencePreview {
+  groups: { key: string; period: number; traces: number[][] }[];
+}
+
+// One effect found in a recording: channels sharing a period.
+export interface SequenceGroup {
+  key: string; // "p0", "p1"… or "irregular"
+  period: number | null; // seconds; null for irregular
+  channels: number;
+  wide: number; // 16-bit pairs among them
+  layered: number; // channels with more than one shape layered
+  universes: number[];
+  score: number; // 0..1, how well it predicts frames it wasn't fitted on
+  passes: number; // times the slowest shape was seen
+}
+
+export interface SequenceMover {
+  universe: number;
+  channel: number; // 1-based (coarse byte for 16-bit)
+  wide: boolean;
+  group: string;
+  periods: number[];
+}
+
+export interface SequenceAnalysisSummary {
+  durationMs: number;
+  groups: SequenceGroup[];
+  stillCount: number;
+  stillLit: number;
+  longestPeriod: number;
+  ready: boolean;
+  locked: boolean; // every repeating group seen enough and predicting well
+  movers: SequenceMover[];
+}
+
+export interface RecordingStatus {
+  state: "idle" | "recording" | "analysing" | "review";
+  elapsedMs: number;
+  maxMs: number;
+  autoStop: boolean;
+  stoppedBy: "manual" | "auto" | "limit" | null;
+  universes: { universe: number; frames: number }[];
+  analysing: boolean;
+  progress: SequenceAnalysisSummary | null;
+  draft: SequenceAnalysisSummary | null;
+  error: string | null;
 }
 
 export interface ActivityEvent {
@@ -34,10 +104,26 @@ export interface EngineState {
   consoleActive: boolean;
   consoleOverride: "auto" | "on" | "off";
   controllerOutput: boolean;
+  holding: boolean; // desk went away; its last look is being held until a scene is pressed
+  desk: DeskStatus;
+  artnetSenders: { ip: string; isConsole: boolean; universes: number[]; agoMs: number }[];
   activeScenes: string[];
   scenes: SceneStatus[];
+  activeSequences: string[];
+  sequences: SequenceStatus[];
+  recording: RecordingStatus | null;
   fade: { active: boolean; remaining: number; total: number };
   log: ActivityEvent[];
+}
+
+export interface DeskStatus {
+  ip: string; // configured console IP — only Art-Net from this address counts as the desk
+  timeoutMs: number;
+  detected: boolean; // desk packets arriving (before any override)
+  lastPacketAgoMs: number | null; // null = never heard
+  packetsPerSec: number;
+  packets: number;
+  universes: { universe: number; agoMs: number }[];
 }
 
 export async function getState(): Promise<EngineState> {
@@ -63,8 +149,56 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`POST ${url} → ${res.status}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `POST ${url} → ${res.status}`);
+  }
   return res.json();
+}
+
+// ---- Companion ----
+
+export interface CompanionModuleInfo {
+  version: string | null;
+  available: boolean; // a package has been built and can be downloaded
+  size: number;
+  file: string; // download filename
+}
+export async function getCompanionModule(): Promise<CompanionModuleInfo> {
+  const res = await fetch("/api/companion/module");
+  if (!res.ok) throw new Error(`companion module → ${res.status}`);
+  return res.json();
+}
+
+// ---- Sequences ----
+
+export function sequenceRecordStart(autoStop = true) {
+  return postJson<{ ok: boolean }>("/api/sequences/record/start", { autoStop });
+}
+export function sequenceRecordStop() {
+  return postJson<{ ok: boolean; draft: SequenceAnalysisSummary }>("/api/sequences/record/stop", {});
+}
+export function sequenceRecordAutoStop(autoStop: boolean) {
+  return postJson<{ ok: boolean }>("/api/sequences/record/auto-stop", { autoStop });
+}
+export function sequenceRecordDiscard() {
+  return postJson<{ ok: boolean }>("/api/sequences/record/discard", {});
+}
+// Save the reviewed recording. `groups`: keys to keep; `includeStill`: bring the still look.
+export function saveSequence(body: { label: string; groups: string[]; includeStill: boolean }) {
+  return postJson<{ ok: boolean; id: string }>("/api/sequences", body);
+}
+export async function getSequencePreview(id: string): Promise<SequencePreview> {
+  const res = await fetch(`/api/sequences/${encodeURIComponent(id)}/preview`);
+  if (!res.ok) throw new Error(`preview ${id} → ${res.status}`);
+  return res.json();
+}
+export function setSequenceLabel(id: string, label: string) {
+  return postJson<{ ok: boolean }>(`/api/sequences/${encodeURIComponent(id)}/label`, { label });
+}
+export async function deleteSequence(id: string): Promise<void> {
+  const res = await fetch(`/api/sequences/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`DELETE sequence ${id} → ${res.status}`);
 }
 
 export function createScene(label: string) {
@@ -73,6 +207,20 @@ export function createScene(label: string) {
 
 export function setLabel(id: string, label: string) {
   return postJson<{ ok: boolean }>(`/api/scenes/${encodeURIComponent(id)}/label`, { label });
+}
+
+export function setFavourite(id: string, favourite: boolean) {
+  return postJson<{ ok: boolean }>(`/api/scenes/${encodeURIComponent(id)}/favourite`, { favourite });
+}
+
+// Set a scene's level directly (0..1). 0 = off. Fire-and-forget: used while
+// dragging a fader, so a lost request is simply superseded by the next one.
+export function setSceneLevel(id: string, level: number, fade = 0) {
+  return fetch("/api/command", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address: `/scene/${id}/level`, args: [level, fade] }),
+  }).catch(() => {});
 }
 
 export interface RawScene {
@@ -131,6 +279,7 @@ export async function restartService(): Promise<{ restarting: boolean }> {
 export interface OutputNode {
   name: string;
   ip: string;
+  source?: string; // send only from this local address (one packet); blank = automatic
   port?: number;
   universes: number[];
 }
@@ -198,7 +347,7 @@ export interface ArtnetOutputRoute {
   name: string;
   ip: string;
   universes: number[];
-  mode: "unicast" | "subnet-broadcast" | "broadcast" | "routed";
+  mode: "unicast" | "subnet-broadcast" | "broadcast" | "routed" | "fixed";
   via: string[];
   packetsPerUpdate: number;
   warning?: string;

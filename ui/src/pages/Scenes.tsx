@@ -12,13 +12,15 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Plus, Code2, Trash2, SlidersHorizontal } from "lucide-react";
+import { Plus, Code2, Trash2, SlidersHorizontal, Star } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { useNavigate } from "react-router-dom";
 import { useEngine } from "@/lib/useEngine";
 import {
   command,
   createScene,
   setLabel,
+  setFavourite,
   getSceneRaw,
   setSceneRaw,
   deleteScene,
@@ -169,12 +171,15 @@ export function Scenes() {
         </Button>
       </div>
 
-      <Card>
+      <Card className="glow-amber">
         <CardContent className="p-0">
           {scenes.length ? (
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-border text-left text-muted-foreground">
+                <tr className="border-b border-white/[0.06] text-left text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+                  <th className="w-10 px-2 py-2 text-center font-medium" title="Favourites are pinned to the dashboard console">
+                    <Star className="mx-auto h-3.5 w-3.5" />
+                  </th>
                   <th className="px-4 py-2 font-medium">Label</th>
                   <th className="w-32 px-4 py-2 font-medium">Status</th>
                   <th className="px-4 py-2 text-right font-medium">Actions</th>
@@ -182,7 +187,21 @@ export function Scenes() {
               </thead>
               <tbody>
                 {scenes.map((s) => (
-                  <tr key={s.id} className="border-b border-border/40 last:border-0">
+                  <tr key={s.id} className="border-b border-white/[0.04] transition-colors last:border-0 hover:bg-white/[0.02]">
+                    <td className="w-10 px-2 py-2 text-center">
+                      <button
+                        onClick={() => setFavourite(s.id, !s.favourite).catch(() => {})}
+                        title={s.favourite ? "Remove from dashboard" : "Pin to dashboard"}
+                        className={cn(
+                          "rounded-md p-1.5 transition-colors",
+                          s.favourite
+                            ? "text-primary drop-shadow-[0_0_6px_hsl(var(--primary)/0.7)]"
+                            : "text-muted-foreground/50 hover:bg-white/[0.06] hover:text-foreground"
+                        )}
+                      >
+                        <Star className={cn("h-4 w-4", s.favourite && "fill-current")} />
+                      </button>
+                    </td>
                     <td className="px-4 py-2">
                       <div className="flex items-center gap-2">
                         <span className="w-8 shrink-0 text-xs text-muted-foreground">#{s.id}</span>
