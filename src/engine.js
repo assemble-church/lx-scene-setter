@@ -24,6 +24,10 @@
 // Channel types (per patched channel):
 //   - level  — normal: scales with a layer's fade level, or snaps if marked snap.
 //   - switch — on/off (non-dim / hot power): always exactly 0 or 255 (≥128 = on).
+//   - led    — a level channel whose output is remapped for an awkward LED lamp:
+//     0 stays 0, anything above is squeezed onto min..max through a gamma curve
+//     (see normaliseRemap in db.js). Applied only at the Art-Net output, so scenes,
+//     faders and the UI all work in logical levels.
 //     Like a snap channel it comes on the instant its layer starts fading in and
 //     only goes off once the layer has fully faded out, so power is never cut while
 //     the lamps it feeds are still fading.
@@ -99,10 +103,20 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
   let patch = db.loadPatch();
   let snapMap = Array.from({ length: U }, () => new Uint8Array(C));
   let switchChannels = []; // [universe, 0-based channel]
+  let remapLuts = []; // per universe: [[0-based channel, Uint8Array(256) lookup], …]
+  const outScratch = new Uint8Array(C); // remapped copy of a universe, for output only
+
+  function buildRemapLut(r) {
+    const { min, max, gamma } = r || { min: 13, max: 76, gamma: 1 };
+    const lut = new Uint8Array(256);
+    for (let v = 1; v < 256; v++) lut[v] = Math.round(min + (max - min) * Math.pow(v / 255, gamma));
+    return lut;
+  }
 
   function compileSnapMap() {
     snapMap = Array.from({ length: U }, () => new Uint8Array(C));
     switchChannels = [];
+    remapLuts = Array.from({ length: U }, () => []);
     for (const fx of patch.fixtures) {
       const u = fx.universe | 0;
       if (u < 0 || u >= U) continue;
@@ -118,6 +132,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
         } else if (fade[ch] === false) {
           snapMap[u][abs] = SNAP;
         }
+        if (types[ch] === "led") remapLuts[u].push([abs, buildRemapLut(fx.remaps && fx.remaps[ch])]);
       }
     }
   }
@@ -469,18 +484,21 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
   let manualPersistTimer = null;
   function persistManual() {
     if (manualPersistTimer) return;
-    manualPersistTimer = setTimeout(() => {
-      manualPersistTimer = null;
-      const rows = [];
-      for (let u = 0; u < U; u++) {
-        for (let ch = 0; ch < C; ch++) {
-          if (!manual.touched[u][ch]) continue;
-          const r = manual.ramps.get(`${u}:${ch}`);
-          rows.push([u, ch, r ? r.to : manual.buf[u][ch]]);
-        }
+    manualPersistTimer = setTimeout(flushManual, 500);
+  }
+  function flushManual() {
+    if (!manualPersistTimer) return;
+    clearTimeout(manualPersistTimer);
+    manualPersistTimer = null;
+    const rows = [];
+    for (let u = 0; u < U; u++) {
+      for (let ch = 0; ch < C; ch++) {
+        if (!manual.touched[u][ch]) continue;
+        const r = manual.ramps.get(`${u}:${ch}`);
+        rows.push([u, ch, r ? r.to : manual.buf[u][ch]]);
       }
-      db.setManual(rows);
-    }, 500);
+    }
+    db.setManual(rows);
   }
 
   // Human name for a channel, from the patch (head label, or fixture + offset).
@@ -574,9 +592,21 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
       const ip = (node.ip || "").trim() || "255.255.255.255"; // no IP → broadcast
       for (const universe of node.universes) {
         if (universe >= U) continue;
-        output.sendUniverse(ip, port, universe, current[universe], (node.source || "").trim() || undefined);
+        output.sendUniverse(ip, port, universe, outputFrame(universe), (node.source || "").trim() || undefined);
       }
     }
+  }
+
+  // What actually leaves for a universe: the merge, with led channels remapped.
+  function outputFrame(u) {
+    const luts = remapLuts[u];
+    if (!luts || !luts.length) return current[u];
+    outScratch.set(current[u]);
+    for (let i = 0; i < luts.length; i++) {
+      const [ch, lut] = luts[i];
+      outScratch[ch] = lut[outScratch[ch]];
+    }
+    return outScratch;
   }
 
   // Render the current instant and push it out.
@@ -1291,6 +1321,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
       clearInterval(feedbackHeartbeat);
       clearTimeout(startupTimer);
       stopRender();
+      flushManual(); // don't lose a hand-set level written moments before shutdown
     };
   }
 

@@ -17,7 +17,7 @@ const store = require("./store");
 const { buildFromText, buildConfig, loadGrouped, serializeConfig } = require("./config");
 const lib = require("./fixtures/library");
 const { importLibraryInWorker, sevenZipStatus } = require("./fixtures/import");
-const { CHANNEL_TYPES } = require("./db");
+const { CHANNEL_TYPES, normaliseRemap } = require("./db");
 const { buildModel, previewModel } = require("./sequences/model");
 
 // Coerce the numeric fields of a grouped config object (the form sends some as
@@ -623,6 +623,8 @@ function createApi(config, logger, engine, artnetIn, recorder) {
             if (c.type) fx.types[i] = c.type;
             if (typeof c.fade === "boolean") fx.fade[i] = c.fade;
             if (typeof c.name === "string") fx.names[i] = c.name;
+            if (!Array.isArray(fx.remaps)) fx.remaps = new Array(fx.channels).fill(null);
+            if (c.remap && typeof c.remap === "object") fx.remaps[i] = normaliseRemap(c.remap);
             // Keep default names and a head's icon in step with the channel type
             // (anything the user has customised is left alone).
             const head = (fx.heads || []).find((h) => h.offset === i + 1 && h.span === 1);

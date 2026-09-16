@@ -428,8 +428,23 @@ export interface FixtureHit {
 export type FixtureKind = "par" | "chandelier" | "beam" | "wash" | "led-tape" | "led-panel" | "power";
 
 // level = normal channel (fades, or snaps if marked snap); switch = on/off only
-// (non-dim / hot power): output is always 0 or 255.
-export type ChannelType = "level" | "switch";
+// (non-dim / hot power): output is always 0 or 255; led = a level channel whose
+// output is remapped (see LedRemap) for a lamp that doesn't dim cleanly.
+export type ChannelType = "level" | "switch" | "led";
+
+// 0 stays 0; 1..255 map onto min..max (DMX) through a gamma curve
+// (1 = linear, below 1 lifts the low end, above 1 holds it back).
+export interface LedRemap {
+  min: number;
+  max: number;
+  gamma: number;
+}
+export const REMAP_DEFAULT: LedRemap = { min: 13, max: 76, gamma: 1 };
+// Output value for a logical 0..255 input through a remap.
+export function remapValue(r: LedRemap, v: number) {
+  if (v <= 0) return 0;
+  return Math.round(r.min + (r.max - r.min) * Math.pow(Math.min(255, v) / 255, r.gamma));
+}
 
 // A "head" is one physical light within a patch entry (dimmer packs have many).
 export interface FixtureHead {
@@ -451,6 +466,7 @@ export interface PatchFixture {
   address: number;
   fade: boolean[];
   types: ChannelType[];
+  remaps?: (LedRemap | null)[]; // per channel; set for "led" channels
   names: string[]; // per-channel name ("" = use the personality's)
   letters?: string[];
   icon?: FixtureKind; // used when the fixture is a single head
@@ -566,7 +582,7 @@ export function patchUpdate(
     address: number;
     label: string;
     fade: boolean[];
-    channels: { type: ChannelType; fade: boolean; name: string }[];
+    channels: { type: ChannelType; fade: boolean; name: string; remap?: LedRemap }[];
     icon: FixtureKind;
     heads: FixtureHead[] | null; // null merges back to a single head
   }>

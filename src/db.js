@@ -24,7 +24,20 @@ const LEGACY_FILES = {
   fixtureMap: "fixture-map.json",
 };
 
-const CHANNEL_TYPES = ["level", "switch"];
+const CHANNEL_TYPES = ["level", "switch", "led"];
+
+// LED remap: how a "led" channel's logical level (1..255) is squeezed onto the
+// lamp's usable range. 0 always stays 0 (full off); anything above maps to
+// min..max through a gamma curve (1 = linear, <1 lifts the low end, >1 holds it
+// back). Defaults suit a lamp that misbehaves above ~30%.
+const REMAP_DEFAULT = { min: 13, max: 76, gamma: 1 };
+function normaliseRemap(r) {
+  const n = (v, lo, hi, d) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Number(v))) : d);
+  const min = Math.round(n(r && r.min, 0, 255, REMAP_DEFAULT.min));
+  const max = Math.round(n(r && r.max, 0, 255, REMAP_DEFAULT.max));
+  const gamma = Math.round(n(r && r.gamma, 0.2, 5, REMAP_DEFAULT.gamma) * 100) / 100;
+  return { min: Math.min(min, max), max: Math.max(min, max), gamma };
+}
 
 const MIGRATIONS = [
   // 1 — initial schema + import of the legacy JSON files.
@@ -104,6 +117,26 @@ const MIGRATIONS = [
       );
     `);
   },
+  // 4 — "led" channel type with a per-channel remap (min / max / gamma, JSON). The
+  // type CHECK can't be altered in place, so the table is rebuilt.
+  (db) => {
+    db.exec(`
+      CREATE TABLE patch_channels_v2 (
+        fixture_id TEXT    NOT NULL REFERENCES patch_fixtures(id) ON DELETE CASCADE,
+        offset     INTEGER NOT NULL,
+        name       TEXT    NOT NULL DEFAULT '',
+        letter     TEXT    NOT NULL DEFAULT '',
+        type       TEXT    NOT NULL DEFAULT 'level' CHECK (type IN ('level', 'switch', 'led')),
+        fade       INTEGER NOT NULL DEFAULT 1,
+        remap      TEXT,                          -- JSON {min,max,gamma} for led channels
+        PRIMARY KEY (fixture_id, offset)
+      );
+      INSERT INTO patch_channels_v2 (fixture_id, offset, name, letter, type, fade)
+        SELECT fixture_id, offset, name, letter, type, fade FROM patch_channels;
+      DROP TABLE patch_channels;
+      ALTER TABLE patch_channels_v2 RENAME TO patch_channels;
+    `);
+  },
 ];
 
 function readLegacy(file) {
@@ -157,6 +190,7 @@ function channelRows(fx) {
       type,
       // A switch never fades — it's on or off.
       fade: type === "switch" ? 0 : fx.fade && fx.fade[i] === false ? 0 : 1,
+      remap: type === "led" ? JSON.stringify(normaliseRemap(fx.remaps && fx.remaps[i])) : null,
     });
   }
   return rows;
@@ -188,8 +222,8 @@ function queries(db) {
       VALUES (@id, @position, @libId, @manufacturer, @name, @label, @mode, @channels, @universe, @address, @icon)
     `,
     insertChannel: `
-      INSERT INTO patch_channels (fixture_id, offset, name, letter, type, fade)
-      VALUES (@fixtureId, @offset, @name, @letter, @type, @fade)
+      INSERT INTO patch_channels (fixture_id, offset, name, letter, type, fade, remap)
+      VALUES (@fixtureId, @offset, @name, @letter, @type, @fade, @remap)
     `,
     insertHead: `
       INSERT INTO patch_heads (fixture_id, offset, span, label, icon)
@@ -348,6 +382,14 @@ function queries(db) {
           letters: byOffset((c) => c.letter, ""),
           names: byOffset((c) => c.name, ""),
           types: byOffset((c) => c.type, "level"),
+          remaps: byOffset((c) => {
+            if (c.type !== "led") return null;
+            try {
+              return normaliseRemap(c.remap ? JSON.parse(c.remap) : null);
+            } catch (_) {
+              return normaliseRemap(null);
+            }
+          }, null),
           icon: f.icon || undefined,
         };
         if (heads[f.id]) {
@@ -434,4 +476,4 @@ function openAppDb(file, { dataDir, logger }) {
   return { ...queries(db), close: () => db.close() };
 }
 
-module.exports = { openAppDb, CHANNEL_TYPES };
+module.exports = { openAppDb, CHANNEL_TYPES, normaliseRemap, REMAP_DEFAULT };

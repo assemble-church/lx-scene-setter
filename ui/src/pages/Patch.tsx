@@ -38,13 +38,19 @@ import {
   type FixtureKind,
   type FixtureHead,
   type ChannelType,
+  type LedRemap,
+  REMAP_DEFAULT,
+  remapValue,
+  manualSet,
+  manualClear,
 } from "@/lib/api";
 
-// "2 switch, 1 snap" — non-default channel behaviour, for the patch table.
+// "2 switch, 1 led, 1 snap" — non-default channel behaviour, for the patch table.
 function channelSummary(fx: PatchFixture) {
   const switches = fx.types?.filter((t) => t === "switch").length ?? 0;
+  const leds = fx.types?.filter((t) => t === "led").length ?? 0;
   const snaps = fx.fade.filter((f, i) => !f && fx.types?.[i] !== "switch").length;
-  return [switches && `${switches} switch`, snaps && `${snaps} snap`].filter(Boolean).join(", ");
+  return [switches && `${switches} switch`, leds && `${leds} led`, snaps && `${snaps} snap`].filter(Boolean).join(", ");
 }
 
 // Lowest start address in `universe` with `channels` consecutive free channels.
@@ -429,6 +435,112 @@ interface ChannelRow {
   type: ChannelType;
   fade: boolean;
   name: string;
+  remap: LedRemap;
+}
+
+const TYPE_LABEL: Record<ChannelType, string> = { level: "Level", switch: "Switch", led: "LED remap" };
+const pct = (v: number) => Math.round((v / 255) * 100);
+const fromPct = (p: number) => Math.round((Math.min(100, Math.max(0, p)) / 100) * 255);
+
+const CURVES: { label: string; gamma: number }[] = [
+  { label: "Softer", gamma: 0.45 },
+  { label: "Soft", gamma: 0.65 },
+  { label: "Linear", gamma: 1 },
+  { label: "Hard", gamma: 1.6 },
+  { label: "Harder", gamma: 2.4 },
+];
+
+// The remap as a picture: logical level across, DMX out up, with the lamp's
+// usable band shaded.
+function RemapCurve({ r }: { r: LedRemap }) {
+  const W = 120;
+  const H = 56;
+  const pts = Array.from({ length: 33 }, (_, i) => {
+    const v = Math.round((i / 32) * 255);
+    return `${(i / 32) * W},${H - (remapValue(r, v) / 255) * H}`;
+  });
+  const yMin = H - (r.min / 255) * H;
+  const yMax = H - (r.max / 255) * H;
+  return (
+    <svg width={W} height={H} className="shrink-0 rounded-md bg-black/40 ring-1 ring-inset ring-white/[0.06]">
+      <rect x={0} y={yMax} width={W} height={Math.max(0, yMin - yMax)} fill="hsl(var(--primary) / 0.12)" />
+      <line x1={0} x2={W} y1={yMin} y2={yMin} stroke="hsl(var(--primary) / 0.5)" strokeDasharray="2 3" />
+      <line x1={0} x2={W} y1={yMax} y2={yMax} stroke="hsl(var(--primary) / 0.5)" strokeDasharray="2 3" />
+      <polyline points={`0,${H} ${pts.slice(1).join(" ")}`} fill="none" stroke="hsl(var(--primary))" strokeWidth={1.5} />
+    </svg>
+  );
+}
+
+// Min / max / curve for one led channel, with a live test fader that drives the
+// real channel (by hand, on top of the scenes) so the lamp can be watched.
+function RemapEditor({
+  r,
+  onChange,
+  onTest,
+  applied,
+}: {
+  r: LedRemap;
+  onChange: (r: LedRemap) => void;
+  onTest: (level: number) => void;
+  applied: boolean; // the engine has these values (saved), so the test shows them
+}) {
+  const [test, setTest] = useState(0);
+  const preset = CURVES.find((c) => Math.abs(c.gamma - r.gamma) < 0.01);
+  const field = (label: string, value: number, set: (v: number) => void, hint: string) => (
+    <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+      <span>
+        {label} <span className="text-muted-foreground/60">{hint}</span>
+      </span>
+      <span className="flex items-center gap-1">
+        <Input type="number" min={0} max={100} className="h-8 w-16" value={pct(value)} onChange={(e) => set(fromPct(Number(e.target.value)))} />
+        <span>%</span>
+        <span className="tabular text-[10px] text-muted-foreground/60">DMX {value}</span>
+      </span>
+    </label>
+  );
+  return (
+    <div className="ml-14 mt-1 flex flex-wrap items-start gap-4 rounded-lg border border-primary/20 bg-primary/[0.04] px-3 py-2.5">
+      <RemapCurve r={r} />
+      {field("Min", r.min, (min) => onChange({ ...r, min, max: Math.max(min, r.max) }), "· lowest level that still lights")}
+      {field("Max", r.max, (max) => onChange({ ...r, max, min: Math.min(max, r.min) }), "· highest before it misbehaves")}
+      <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+        <span>Curve</span>
+        <span className="flex items-center gap-1">
+          <div className="flex overflow-hidden rounded-md border border-border/60">
+            {CURVES.map((c) => (
+              <button
+                key={c.label}
+                type="button"
+                onClick={() => onChange({ ...r, gamma: c.gamma })}
+                className={cn("px-2 py-1 text-[11px]", preset?.label === c.label ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-accent/40")}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+          <Input type="number" step={0.05} min={0.2} max={5} className="h-8 w-16" value={r.gamma} onChange={(e) => onChange({ ...r, gamma: Number(e.target.value) || 1 })} />
+        </span>
+      </label>
+      <label className="flex min-w-[200px] flex-1 flex-col gap-1 text-[11px] text-muted-foreground">
+        <span>
+          Test {test}% → DMX {remapValue(r, fromPct(test))}
+          {!applied && <span className="text-busy"> · apply to hear the new curve</span>}
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={test}
+          className="accent-[hsl(var(--primary))]"
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            setTest(v);
+            onTest(v);
+          }}
+        />
+      </label>
+    </div>
+  );
 }
 
 function ChannelsDialog({
@@ -443,16 +555,21 @@ function ChannelsDialog({
   const [rows, setRows] = useState<ChannelRow[]>([]);
   const [placeholders, setPlaceholders] = useState<string[]>([]); // personality names
   const [busy, setBusy] = useState(false);
+  const [applied, setApplied] = useState<string>(""); // JSON of the remaps the engine has
+  const tested = useRef(new Set<number>()); // channel offsets driven by the test fader
+
+  const remapsJson = (rs: ChannelRow[]) => JSON.stringify(rs.map((r) => (r.type === "led" ? r.remap : null)));
 
   useEffect(() => {
     if (!entry) return;
-    setRows(
-      Array.from({ length: entry.channels }, (_, i) => ({
-        type: entry.types?.[i] ?? "level",
-        fade: entry.fade[i] !== false,
-        name: entry.names?.[i] ?? "",
-      }))
-    );
+    const initial = Array.from({ length: entry.channels }, (_, i) => ({
+      type: entry.types?.[i] ?? "level",
+      fade: entry.fade[i] !== false,
+      name: entry.names?.[i] ?? "",
+      remap: entry.remaps?.[i] ?? { ...REMAP_DEFAULT },
+    }));
+    setRows(initial);
+    setApplied(remapsJson(initial));
     setPlaceholders([]);
     if (entry.libId == null) return;
     getFixture(entry.libId)
@@ -479,32 +596,66 @@ function ChannelsDialog({
     });
   }
 
-  async function save() {
+  // Drive a channel by hand while the dialog is open, so the lamp can be watched.
+  function test(i: number, level: number) {
+    if (!entry) return;
+    tested.current.add(i);
+    manualSet([{ universe: entry.universe, channel: entry.address + i, value: fromPct(level) }]);
+  }
+  function releaseTests() {
+    if (!entry || !tested.current.size) return;
+    manualClear([...tested.current].map((i) => ({ universe: entry.universe, channel: entry.address + i })));
+    tested.current.clear();
+  }
+  function close() {
+    releaseTests();
+    onClose();
+  }
+
+  const payload = () => rows.map((r) => ({ type: r.type, fade: r.fade, name: r.name, ...(r.type === "led" ? { remap: r.remap } : {}) }));
+
+  // Apply: save and keep editing (the test fader then plays through the new curve).
+  async function apply() {
     if (!entry) return;
     setBusy(true);
     try {
-      await patchUpdate(entry.id, { channels: rows });
+      await patchUpdate(entry.id, { channels: payload() });
+      setApplied(remapsJson(rows));
       onSaved();
-      onClose();
     } finally {
       setBusy(false);
     }
   }
+  async function save() {
+    if (!entry) return;
+    setBusy(true);
+    try {
+      await patchUpdate(entry.id, { channels: payload() });
+      onSaved();
+      close();
+    } finally {
+      setBusy(false);
+    }
+  }
+  const hasLed = rows.some((r) => r.type === "led");
 
   return (
-    <Dialog open={!!entry} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-2xl">
+    <Dialog open={!!entry} onOpenChange={(o) => !o && close()}>
+      <DialogContent className="max-w-3xl">
         <DialogHeader>
           <DialogTitle>Channels — {entry?.label}</DialogTitle>
           <DialogDescription>
             <b>Level</b> channels ramp with crossfades, or <b>snap</b> instantly (shutters, control…).{" "}
             <b>Switch</b> channels are on/off only — non-dim loads and hot power: on as soon as a scene
-            starts, off only once it has fully faded out.
+            starts, off only once it has fully faded out. <b>LED remap</b> is a level channel for a lamp
+            that doesn't dim cleanly: 0 is still off, but everything above is squeezed between a min and
+            max through a curve, so scenes and faders keep using the full 0–100%.
           </DialogDescription>
         </DialogHeader>
-        <div className="max-h-96 space-y-1 overflow-auto">
+        <div className="max-h-[60vh] space-y-1 overflow-auto">
           {rows.map((r, i) => (
-            <div key={i} className="flex items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-sm">
+            <div key={i}>
+            <div className="flex items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-1.5 text-sm">
               <span className="w-14 shrink-0 tabular-nums text-muted-foreground">
                 Ch {i + 1}
                 {entry && <span className="block text-[10px]">DMX {entry.address + i}</span>}
@@ -516,20 +667,22 @@ function ChannelsDialog({
                 onChange={(e) => update(i, { name: e.target.value })}
               />
               <div className="flex overflow-hidden rounded-md border border-border/60">
-                {(["level", "switch"] as const).map((t) => (
+                {(["level", "switch", "led"] as const).map((t) => (
                   <button
                     key={t}
                     onClick={() => setType(i, t)}
                     className={cn(
-                      "px-2.5 py-1 text-xs capitalize",
+                      "whitespace-nowrap px-2.5 py-1 text-xs",
                       r.type === t
                         ? t === "switch"
                           ? "bg-amber-500 text-black"
-                          : "bg-secondary text-foreground"
+                          : t === "led"
+                            ? "bg-primary text-primary-foreground"
+                            : "bg-secondary text-foreground"
                         : "text-muted-foreground hover:bg-accent/40"
                     )}
                   >
-                    {t}
+                    {TYPE_LABEL[t]}
                   </button>
                 ))}
               </div>
@@ -542,12 +695,26 @@ function ChannelsDialog({
                 <Badge variant={r.fade ? "secondary" : "warning"}>{r.fade ? "fade" : "snap"}</Badge>
               </button>
             </div>
+            {r.type === "led" && (
+              <RemapEditor
+                r={r.remap}
+                onChange={(remap) => update(i, { remap })}
+                onTest={(level) => test(i, level)}
+                applied={applied === remapsJson(rows)}
+              />
+            )}
+            </div>
           ))}
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>
+          <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
+          {hasLed && (
+            <Button variant="outline" onClick={apply} disabled={busy} title="Save and keep editing — the test fader then plays through the new curve">
+              Apply
+            </Button>
+          )}
           <Button onClick={save} disabled={busy}>
             Save
           </Button>
