@@ -433,17 +433,23 @@ export type FixtureKind = "par" | "chandelier" | "beam" | "wash" | "led-tape" | 
 export type ChannelType = "level" | "switch" | "led";
 
 // 0 stays 0; 1..255 map onto min..max (DMX) through a gamma curve
-// (1 = linear, below 1 lifts the low end, above 1 holds it back).
+// (1 = linear, below 1 lifts the low end, above 1 holds it back). `rate` caps
+// how fast the output may move, in DMX steps per second (0 = instant).
 export interface LedRemap {
   min: number;
   max: number;
   gamma: number;
+  rate: number;
 }
-export const REMAP_DEFAULT: LedRemap = { min: 13, max: 76, gamma: 1 };
+export const REMAP_DEFAULT: LedRemap = { min: 13, max: 76, gamma: 1, rate: 40 };
 // Output value for a logical 0..255 input through a remap.
 export function remapValue(r: LedRemap, v: number) {
   if (v <= 0) return 0;
   return Math.round(r.min + (r.max - r.min) * Math.pow(Math.min(255, v) / 255, r.gamma));
+}
+// The logical 1..255 level that lands at `p` (0..1) of the way from min to max.
+export function remapInverse(r: LedRemap, p: number) {
+  return Math.max(1, Math.round(255 * Math.pow(Math.min(1, Math.max(0, p)), 1 / r.gamma)));
 }
 
 // A "head" is one physical light within a patch entry (dimmer packs have many).

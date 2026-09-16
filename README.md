@@ -50,8 +50,9 @@ the desk still controls the rig directly. The Pi is purely additive insurance.
   (with counts, auto-addressing and per-channel snap/fade), and give each an icon.
 - **LED remap channels** — for "dimmable" LED lamps that misbehave: a third channel
   type that keeps 0 as off but squeezes everything above onto the lamp's usable
-  min–max range through a curve, applied only at the Art-Net output. Patch → Channels
-  has the editor with a curve preview and a live test fader.
+  min–max range through a curve, with a max speed so the output glides rather than
+  slams — all applied only at the Art-Net output. Patch → Channels has the editor
+  with a curve preview and a live test fader that runs across the lamp's band.
 - **Web-based moving-light programmer** — an Avolites-style fixture grid and a
   live programmer for building looks (intensity, colour, pan/tilt, gobo…) and
   saving them straight to scenes, all in the browser.

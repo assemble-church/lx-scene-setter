@@ -29,14 +29,17 @@ const CHANNEL_TYPES = ["level", "switch", "led"];
 // LED remap: how a "led" channel's logical level (1..255) is squeezed onto the
 // lamp's usable range. 0 always stays 0 (full off); anything above maps to
 // min..max through a gamma curve (1 = linear, <1 lifts the low end, >1 holds it
-// back). Defaults suit a lamp that misbehaves above ~30%.
-const REMAP_DEFAULT = { min: 13, max: 76, gamma: 1 };
+// back). `rate` caps how fast the output may move, in DMX steps per second
+// (0 = instant) — some lamps drop out of their dimming response when slammed.
+// Defaults suit a lamp that misbehaves above ~30%.
+const REMAP_DEFAULT = { min: 13, max: 76, gamma: 1, rate: 40 };
 function normaliseRemap(r) {
   const n = (v, lo, hi, d) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Number(v))) : d);
   const min = Math.round(n(r && r.min, 0, 255, REMAP_DEFAULT.min));
   const max = Math.round(n(r && r.max, 0, 255, REMAP_DEFAULT.max));
   const gamma = Math.round(n(r && r.gamma, 0.2, 5, REMAP_DEFAULT.gamma) * 100) / 100;
-  return { min: Math.min(min, max), max: Math.max(min, max), gamma };
+  const rate = Math.round(n(r && r.rate, 0, 2550, REMAP_DEFAULT.rate));
+  return { min: Math.min(min, max), max: Math.max(min, max), gamma, rate };
 }
 
 const MIGRATIONS = [

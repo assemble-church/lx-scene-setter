@@ -41,6 +41,7 @@ import {
   type LedRemap,
   REMAP_DEFAULT,
   remapValue,
+  remapInverse,
   manualSet,
   manualClear,
 } from "@/lib/api";
@@ -471,8 +472,9 @@ function RemapCurve({ r }: { r: LedRemap }) {
   );
 }
 
-// Min / max / curve for one led channel, with a live test fader that drives the
-// real channel (by hand, on top of the scenes) so the lamp can be watched.
+// Min / max / curve / speed for one led channel, with a live test fader that
+// drives the real channel (by hand, on top of the scenes) so the lamp can be
+// watched. The fader runs across the lamp's band: bottom = min, top = max.
 function RemapEditor({
   r,
   onChange,
@@ -481,11 +483,14 @@ function RemapEditor({
 }: {
   r: LedRemap;
   onChange: (r: LedRemap) => void;
-  onTest: (level: number) => void;
+  onTest: (logical: number) => void; // 0..255 logical level for the channel
   applied: boolean; // the engine has these values (saved), so the test shows them
 }) {
-  const [test, setTest] = useState(0);
+  const [test, setTest] = useState<number | null>(null); // 0..100 across min..max; null = off
+  const testOut = test === null ? 0 : Math.round(r.min + (r.max - r.min) * (test / 100));
+  const testLogical = test === null ? 0 : remapInverse(r, test / 100);
   const preset = CURVES.find((c) => Math.abs(c.gamma - r.gamma) < 0.01);
+  const ratePct = Math.round((r.rate / 255) * 1000) / 10; // % of full scale per second
   const field = (label: string, value: number, set: (v: number) => void, hint: string) => (
     <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
       <span>
@@ -521,24 +526,60 @@ function RemapEditor({
           <Input type="number" step={0.05} min={0.2} max={5} className="h-8 w-16" value={r.gamma} onChange={(e) => onChange({ ...r, gamma: Number(e.target.value) || 1 })} />
         </span>
       </label>
-      <label className="flex min-w-[200px] flex-1 flex-col gap-1 text-[11px] text-muted-foreground">
+      <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
         <span>
-          Test {test}% → DMX {remapValue(r, fromPct(test))}
-          {!applied && <span className="text-busy"> · apply to hear the new curve</span>}
+          Max speed <span className="text-muted-foreground/60">· 0 = instant</span>
         </span>
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={test}
-          className="accent-[hsl(var(--primary))]"
-          onChange={(e) => {
-            const v = Number(e.target.value);
-            setTest(v);
-            onTest(v);
-          }}
-        />
+        <span className="flex items-center gap-1">
+          <Input
+            type="number"
+            min={0}
+            max={1000}
+            step={1}
+            className="h-8 w-16"
+            value={ratePct}
+            onChange={(e) => onChange({ ...r, rate: Math.round((Math.max(0, Number(e.target.value) || 0) / 100) * 255) })}
+          />
+          <span>%/s</span>
+          <span className="tabular text-[10px] text-muted-foreground/60">{r.rate ? `${((r.max - r.min) / r.rate).toFixed(1)}s min→max` : "no limit"}</span>
+        </span>
       </label>
+      <div className="flex min-w-[240px] flex-1 flex-col gap-1 text-[11px] text-muted-foreground">
+        <span>
+          Test · lamp at{" "}
+          <span className="tabular text-foreground">
+            {test === null ? "off" : `DMX ${testOut}`}
+          </span>
+          {test !== null && <span className="text-muted-foreground/60"> (channel at {pct(testLogical)}%)</span>}
+          {!applied && <span className="text-busy"> · apply to hear these settings</span>}
+        </span>
+        <span className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setTest(null);
+              onTest(0);
+            }}
+            className={cn("rounded-md px-2 py-1 text-[11px] ring-1 ring-inset", test === null ? "bg-secondary text-foreground ring-white/10" : "text-muted-foreground ring-white/10 hover:bg-accent/40")}
+          >
+            Off
+          </button>
+          <span className="tabular text-[10px] text-muted-foreground/60">min {r.min}</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={test ?? 0}
+            className="flex-1 accent-[hsl(var(--primary))]"
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setTest(v);
+              onTest(remapInverse(r, v / 100));
+            }}
+          />
+          <span className="tabular text-[10px] text-muted-foreground/60">max {r.max}</span>
+        </span>
+      </div>
     </div>
   );
 }
@@ -597,10 +638,10 @@ function ChannelsDialog({
   }
 
   // Drive a channel by hand while the dialog is open, so the lamp can be watched.
-  function test(i: number, level: number) {
+  function test(i: number, logical: number) {
     if (!entry) return;
     tested.current.add(i);
-    manualSet([{ universe: entry.universe, channel: entry.address + i, value: fromPct(level) }]);
+    manualSet([{ universe: entry.universe, channel: entry.address + i, value: logical }]);
   }
   function releaseTests() {
     if (!entry || !tested.current.size) return;
@@ -699,7 +740,7 @@ function ChannelsDialog({
               <RemapEditor
                 r={r.remap}
                 onChange={(remap) => update(i, { remap })}
-                onTest={(level) => test(i, level)}
+                onTest={(logical) => test(i, logical)}
                 applied={applied === remapsJson(rows)}
               />
             )}

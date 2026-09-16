@@ -25,8 +25,9 @@
 //   - level  — normal: scales with a layer's fade level, or snaps if marked snap.
 //   - switch — on/off (non-dim / hot power): always exactly 0 or 255 (≥128 = on).
 //   - led    — a level channel whose output is remapped for an awkward LED lamp:
-//     0 stays 0, anything above is squeezed onto min..max through a gamma curve
-//     (see normaliseRemap in db.js). Applied only at the Art-Net output, so scenes,
+//     0 stays 0, anything above is squeezed onto min..max through a gamma curve,
+//     and the output may only move so many DMX steps per second (see
+//     normaliseRemap in db.js). Applied only at the Art-Net output, so scenes,
 //     faders and the UI all work in logical levels.
 //     Like a snap channel it comes on the instant its layer starts fading in and
 //     only goes off once the layer has fully faded out, so power is never cut while
@@ -103,8 +104,12 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
   let patch = db.loadPatch();
   let snapMap = Array.from({ length: U }, () => new Uint8Array(C));
   let switchChannels = []; // [universe, 0-based channel]
-  let remapLuts = []; // per universe: [[0-based channel, Uint8Array(256) lookup], …]
-  const outScratch = new Uint8Array(C); // remapped copy of a universe, for output only
+  let remapLuts = []; // per universe: [{ ch (0-based), lut: Uint8Array(256), min, rate }, …]
+  // Where each led channel's output actually is (it may lag the target while
+  // rate-limited). Kept across patch recompiles so a re-save doesn't jolt lamps.
+  let slewVal = Array.from({ length: U }, () => new Float32Array(C));
+  let slewBusy = false; // some led output is still travelling toward its target
+  let lastOutputAt = 0;
 
   function buildRemapLut(r) {
     const { min, max, gamma } = r || { min: 13, max: 76, gamma: 1 };
@@ -132,7 +137,10 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
         } else if (fade[ch] === false) {
           snapMap[u][abs] = SNAP;
         }
-        if (types[ch] === "led") remapLuts[u].push([abs, buildRemapLut(fx.remaps && fx.remaps[ch])]);
+        if (types[ch] === "led") {
+          const r = (fx.remaps && fx.remaps[ch]) || {};
+          remapLuts[u].push({ ch: abs, lut: buildRemapLut(r), min: r.min | 0, rate: Number(r.rate) || 0 });
+        }
       }
     }
   }
@@ -189,6 +197,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
       programmer.touched.push(new Uint8Array(C));
       manual.buf.push(new Uint8Array(C));
       manual.touched.push(new Uint8Array(C));
+      slewVal.push(new Float32Array(C));
     }
     logger.info(`Universes: now handling 0–${n - 1}`);
     U = n;
@@ -587,26 +596,58 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
 
   function outputAll() {
     if (!state.piOutputEnabled) return;
+    const t = now();
+    // Seconds since the last frame, for the slew limit. Capped so a long idle gap
+    // (keep-alive only) can't turn into one big jump.
+    const dt = lastOutputAt ? Math.min(0.25, (t - lastOutputAt) / 1000) : 0;
+    lastOutputAt = t;
+    slewBusy = false;
+    // Each universe is remapped once even if several outputs carry it.
+    const frames = new Map();
     for (const node of config.outputs) {
       const port = node.port || config.artnetPort;
       const ip = (node.ip || "").trim() || "255.255.255.255"; // no IP → broadcast
       for (const universe of node.universes) {
         if (universe >= U) continue;
-        output.sendUniverse(ip, port, universe, outputFrame(universe), (node.source || "").trim() || undefined);
+        let frame = frames.get(universe);
+        if (!frame) {
+          frame = outputFrame(universe, dt);
+          frames.set(universe, frame);
+        }
+        output.sendUniverse(ip, port, universe, frame, (node.source || "").trim() || undefined);
       }
     }
+    // Keep rendering until every rate-limited lamp has arrived.
+    if (slewBusy) scheduleRender();
   }
 
-  // What actually leaves for a universe: the merge, with led channels remapped.
-  function outputFrame(u) {
+  // What actually leaves for a universe: the merge, with led channels remapped
+  // and rate-limited. Off (0) is always immediate; anything else climbs from the
+  // lamp's min and moves at most `rate` steps per second.
+  function outputFrame(u, dt) {
     const luts = remapLuts[u];
     if (!luts || !luts.length) return current[u];
-    outScratch.set(current[u]);
+    const out = new Uint8Array(current[u]); // a copy per universe: several may be in flight
+    const slew = slewVal[u];
     for (let i = 0; i < luts.length; i++) {
-      const [ch, lut] = luts[i];
-      outScratch[ch] = lut[outScratch[ch]];
+      const { ch, lut, min, rate } = luts[i];
+      const target = lut[out[ch]];
+      if (target === 0 || rate <= 0) {
+        slew[ch] = target;
+      } else {
+        let cur = slew[ch];
+        if (cur < min) cur = min; // from off, start at the bottom of the usable band
+        const step = rate * dt;
+        const diff = target - cur;
+        if (Math.abs(diff) <= step) slew[ch] = target;
+        else {
+          slew[ch] = cur + Math.sign(diff) * step;
+          slewBusy = true;
+        }
+      }
+      out[ch] = Math.round(slew[ch]);
     }
-    return outScratch;
+    return out;
   }
 
   // Render the current instant and push it out.
@@ -659,7 +700,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
           emit();
         }
       }
-      if (anyFading() || sequenceRunning() || manualRamping()) {
+      if (anyFading() || sequenceRunning() || manualRamping() || slewBusy) {
         renderTimer = setTimeout(tick, frameMs());
       } else {
         renderTimer = null;
