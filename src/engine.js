@@ -28,6 +28,13 @@
 //     only goes off once the layer has fully faded out, so power is never cut while
 //     the lamps it feeds are still fading.
 //
+// Manual channel overrides (the phone's Channel mode):
+//   - Individual dimmer/switch channels can be set directly. Each touched channel
+//     sits on top of the scene + sequence merge (LTP) until it is cleared, without
+//     stopping any scene or locking Companion. Dimmers can ramp over a fade; snap
+//     and switch channels jump. "All off" (/scenes/off) clears them too. Persisted,
+//     so a restart keeps the lights where someone left them.
+//
 // Sequences (recorded chases/effects, see src/sequences/):
 //   - Each running sequence is a layer keyed "seq:<id>" with its own fade and a
 //     clock starting when it was switched on.
@@ -139,6 +146,14 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
     source: null, // scene id being edited, when loaded from a scene
   };
 
+  // Manual channel overrides — see the header. `ramps` holds in-flight fades keyed
+  // "u:ch" so a dimmer can glide to its new level.
+  const manual = {
+    buf: Array.from({ length: U }, () => new Uint8Array(C)),
+    touched: Array.from({ length: U }, () => new Uint8Array(C)),
+    ramps: new Map(), // "u:ch" → { from, to, start, dur }
+  };
+
   // Grow every per-universe buffer so universes 0..n-1 exist. Returns false (and
   // logs once) past MAX_UNIVERSES.
   let warnedMaxUniverses = false;
@@ -157,6 +172,8 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
       editor.buf.push(new Uint8Array(C));
       programmer.buf.push(new Uint8Array(C));
       programmer.touched.push(new Uint8Array(C));
+      manual.buf.push(new Uint8Array(C));
+      manual.touched.push(new Uint8Array(C));
     }
     logger.info(`Universes: now handling 0–${n - 1}`);
     U = n;
@@ -177,6 +194,14 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
   // Runtime layer state per scene id:
   //   { level: 0..1, target: 0|1, fadeFrom: 0..1, fadeStart: ms, fadeDur: ms }
   const layers = {};
+
+  // Persisted manual overrides come back exactly as they were.
+  for (const [u, ch, v] of db.getManual()) {
+    if (!ensureUniverses((u | 0) + 1)) continue;
+    if (ch < 0 || ch >= C) continue;
+    manual.buf[u][ch] = Math.max(0, Math.min(255, v | 0));
+    manual.touched[u][ch] = 1;
+  }
 
   // Persisted: which scene ids were on (restored on boot).
   const persistedActive = db.getActiveScenes();
@@ -403,6 +428,145 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
     }
   }
 
+  // ---------------- MANUAL OVERRIDES ----------------
+
+  function manualRamping() {
+    return manual.ramps.size > 0;
+  }
+
+  // Advance in-flight ramps, then lay every touched channel over the merge.
+  function applyManual(t) {
+    if (manual.ramps.size) {
+      for (const [key, r] of manual.ramps) {
+        const [u, ch] = key.split(":").map(Number);
+        const p = r.dur > 0 ? Math.min((t - r.start) / r.dur, 1) : 1;
+        if (u < U && ch < C) manual.buf[u][ch] = p >= 1 ? r.to : Math.round(r.from + (r.to - r.from) * p);
+        if (p >= 1) manual.ramps.delete(key);
+      }
+    }
+    for (let u = 0; u < U; u++) {
+      const touched = manual.touched[u];
+      const src = manual.buf[u];
+      const dst = current[u];
+      for (let ch = 0; ch < C; ch++) if (touched[ch]) dst[ch] = src[ch];
+    }
+  }
+
+  function manualList() {
+    const out = [];
+    for (let u = 0; u < U; u++) {
+      const touched = manual.touched[u];
+      for (let ch = 0; ch < C; ch++) {
+        if (!touched[ch]) continue;
+        const r = manual.ramps.get(`${u}:${ch}`);
+        out.push({ universe: u, channel: ch + 1, value: manual.buf[u][ch], target: r ? r.to : manual.buf[u][ch] });
+      }
+    }
+    return out;
+  }
+
+  // Write-behind: dragging a fader sends many updates a second; the DB gets one.
+  let manualPersistTimer = null;
+  function persistManual() {
+    if (manualPersistTimer) return;
+    manualPersistTimer = setTimeout(() => {
+      manualPersistTimer = null;
+      const rows = [];
+      for (let u = 0; u < U; u++) {
+        for (let ch = 0; ch < C; ch++) {
+          if (!manual.touched[u][ch]) continue;
+          const r = manual.ramps.get(`${u}:${ch}`);
+          rows.push([u, ch, r ? r.to : manual.buf[u][ch]]);
+        }
+      }
+      db.setManual(rows);
+    }, 500);
+  }
+
+  // Human name for a channel, from the patch (head label, or fixture + offset).
+  function channelName(u, ch) {
+    for (const fx of patch.fixtures) {
+      if ((fx.universe | 0) !== u) continue;
+      const off = ch - ((fx.address | 0) - 1); // 0-based offset within the fixture
+      if (off < 0 || off >= (fx.channels | 0)) continue;
+      const head = (fx.heads || []).find((h) => off >= h.offset - 1 && off < h.offset - 1 + h.span);
+      if (head && head.label) return head.label;
+      const name = (fx.names || [])[off];
+      return fx.channels === 1 ? fx.label || name : `${fx.label} ${name || `ch ${off + 1}`}`;
+    }
+    return `U${u} ch ${ch + 1}`;
+  }
+
+  // Set channels directly: updates = [{ universe, channel (1-based), value 0..255 }].
+  // Dimmers ramp over `fadeSeconds`; snap and switch channels jump. Returns false
+  // while the desk is live (nothing the Pi outputs would reach the rig anyway).
+  function manualSet(updates, fadeSeconds) {
+    if (state.consoleActive) {
+      consoleBlocked("Manual channel control");
+      return false;
+    }
+    const t = now();
+    const dur = Math.max(0, Number(fadeSeconds) || 0) * 1000;
+    let changed = false;
+    for (const x of updates || []) {
+      const u = x.universe | 0;
+      const ch = (x.channel | 0) - 1;
+      const v = Math.max(0, Math.min(255, x.value | 0));
+      if (u < 0 || ch < 0 || ch >= C || !ensureUniverses(u + 1)) continue;
+      const key = `${u}:${ch}`;
+      if (!manual.touched[u][ch]) {
+        // Start from where the channel is now, so a fade glides from the live level.
+        manual.buf[u][ch] = current[u][ch];
+        manual.touched[u][ch] = 1;
+        event("manual", `${channelName(u, ch)} taken over by hand (${Math.round((v / 255) * 100)}%)`);
+      }
+      if (dur > 0 && !snapMap[u][ch] && manual.buf[u][ch] !== v) {
+        manual.ramps.set(key, { from: manual.buf[u][ch], to: v, start: t, dur });
+      } else {
+        manual.ramps.delete(key);
+        manual.buf[u][ch] = v;
+      }
+      changed = true;
+    }
+    if (!changed) return true;
+    state.piOutputEnabled = true;
+    releaseHold(0);
+    renderAndOutput();
+    if (manualRamping()) scheduleRender();
+    persistManual();
+    return true;
+  }
+
+  // Hand channels back to the scenes: `channels` = [{ universe, channel }], or
+  // nothing for all of them.
+  function manualClear(channels) {
+    let n = 0;
+    if (Array.isArray(channels)) {
+      for (const x of channels) {
+        const u = x.universe | 0;
+        const ch = (x.channel | 0) - 1;
+        if (u < 0 || u >= U || ch < 0 || ch >= C || !manual.touched[u][ch]) continue;
+        manual.touched[u][ch] = 0;
+        manual.buf[u][ch] = 0;
+        manual.ramps.delete(`${u}:${ch}`);
+        event("manual", `${channelName(u, ch)} handed back to the scenes`);
+        n++;
+      }
+    } else {
+      for (let u = 0; u < U; u++) {
+        for (let ch = 0; ch < C; ch++) if (manual.touched[u][ch]) n++;
+        manual.touched[u].fill(0);
+        manual.buf[u].fill(0);
+      }
+      manual.ramps.clear();
+      if (n) event("manual", `All ${n} manual channel${n === 1 ? "" : "s"} handed back to the scenes`);
+    }
+    if (!n) return true;
+    renderAndOutput();
+    persistManual();
+    return true;
+  }
+
   function outputAll() {
     if (!state.piOutputEnabled) return;
     for (const node of config.outputs) {
@@ -427,6 +591,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
     }
     advanceLayers(now());
     renderToCurrent();
+    applyManual(now());
     if (programmer.active) {
       for (let u = 0; u < U; u++) {
         const t = programmer.touched[u];
@@ -464,7 +629,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
           emit();
         }
       }
-      if (anyFading() || sequenceRunning()) {
+      if (anyFading() || sequenceRunning() || manualRamping()) {
         renderTimer = setTimeout(tick, frameMs());
       } else {
         renderTimer = null;
@@ -492,7 +657,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
     renderAndOutput();
     broadcastTop();
     broadcastScenes();
-    if (anyFading() || sequenceRunning()) scheduleRender();
+    if (anyFading() || sequenceRunning() || manualRamping()) scheduleRender();
     emitFade();
   }
 
@@ -853,6 +1018,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
     releaseHold(fade);
     for (const id of Object.keys(layers)) setLayer(id, false, fade);
     event("scenes", `All scenes and sequences off${Number(fade) ? ` (${Number(fade)}s)` : ""}`);
+    manualClear(); // blackout means blackout: hand-set channels go too
     persist();
     commit();
   }
@@ -998,6 +1164,11 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
     // /sequences/off [fade] → every sequence off, scenes untouched
     if (cmd === "sequences" && parts[1] === "off") {
       return void sequencesOff(resolveFade(msg, parts[2]));
+    }
+
+    // /manual/clear → hand every hand-set channel (phone Channel mode) back to the scenes
+    if (cmd === "manual" && parts[1] === "clear") {
+      return void manualClear();
     }
 
     // /scenes/off [fade]  → all layers off (scenes and sequences)
@@ -1191,6 +1362,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
             ...describeModel(sequences[id].model),
           };
         }),
+      manual: manualList(),
       recording: recorder ? recorder.status() : null,
       fade: { active: f.active, remaining: round1(f.remaining), total: round1(f.total) },
       log: activityLog.slice(-60),
@@ -1285,6 +1457,7 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
       // continues from the current look, THEN stash & stop the scenes.
       advanceLayers(now());
       renderToCurrent();
+      applyManual(now());
       for (let u = 0; u < U; u++) {
         programmer.buf[u].set(current[u]);
         programmer.touched[u].fill(1);
@@ -1408,6 +1581,8 @@ function createEngine({ config, logger, db, output, sendOsc, sendRaw, recorder }
     programmerClear,
     programmerLoadScene,
     programmerSaveToScene,
+    manualSet,
+    manualClear,
     editBegin,
     editSet,
     editSave,

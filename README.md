@@ -58,6 +58,10 @@ the desk still controls the rig directly. The Pi is purely additive insurance.
   pads with loop dials, live universe grids and an activity log.
 - **Companion module** — served by the app itself (Companion page → Download), with
   live scene/sequence dropdowns, feedbacks, variables and presets.
+- **Phone view** (`/m`) — phones landing on the dashboard are sent here automatically.
+  *Trigger* fires scenes and sequences (tap to fade, hold for solo, hold "All off" to
+  black out); *Channels* drives every patched dimmer and switch by hand, on top of the
+  scenes, until handed back. Add it to the home screen for a standalone app.
 - **Terminal Art-Net monitor** — a standalone CLI to visualise any Art-Net stream.
 
 ## How it works
@@ -361,7 +365,8 @@ segment (legacy), or `0`.
 | `/scene/<id>/toggle` `[fade]` | flip scene `<id>` |
 | `/scene/<id>/play` `[fade]` | **solo** `<id>` — turn it on and all others off (full-look button) |
 | `/scene/<id>/level` `<0–1 or 0–100>` `[fade]` | set scene `<id>` to a partial level (0 = off); what the dashboard faders send |
-| `/scenes/off` `[fade]` | fade every scene out (and any held desk look) |
+| `/scenes/off` `[fade]` | fade every scene out (and any held desk look, and hand-set channels) |
+| `/manual/clear` | hand every channel set by hand (phone Channels mode) back to the scenes |
 | `/sequence/<id>/on` · `/off` · `/toggle` `[fade]` | run / stop sequence `<id>` |
 | `/sequences/off` `[fade]` | stop every sequence (scenes untouched) |
 | `/hold/release` `[fade]` | crossfade out of the held desk look to whatever scenes are on |

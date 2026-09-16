@@ -74,6 +74,7 @@
   body {
     -webkit-user-select: none;
     user-select: none;
+    -webkit-touch-callout: none; /* no long-press callouts on the pads */
   }
   input,
   textarea,
@@ -325,6 +326,25 @@
   @keyframes stripe-move {
     to {
       background-position: 28px 0;
+    }
+  }
+
+  /* Touch targets: no grey tap flash, no double-tap zoom. */
+  .tap {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  /* Hold-to-fire progress: fills a pad from the bottom while the finger is down. */
+  .hold-fill {
+    transform-origin: bottom;
+    animation: hold-fill 0.55s linear forwards;
+  }
+  @keyframes hold-fill {
+    from {
+      transform: scaleY(0);
+    }
+    to {
+      transform: scaleY(1);
     }
   }
 

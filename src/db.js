@@ -298,6 +298,16 @@ function queries(db) {
       kvSet("activeSequences", ids);
     },
 
+    // Manual channel overrides (phone Channel mode): [[universe, channel0, value], …].
+    getManual() {
+      const rows = kvGet("manual", []);
+      return Array.isArray(rows) ? rows.filter((r) => Array.isArray(r) && r.length === 3) : [];
+    },
+
+    setManual(rows) {
+      kvSet("manual", rows);
+    },
+
     // The desk look being held after the desk went away (array of per-universe
     // byte arrays), or null. Stored base64 per universe to keep the row small.
     getHeldLook() {

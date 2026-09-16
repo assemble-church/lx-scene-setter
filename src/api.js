@@ -499,6 +499,21 @@ function createApi(config, logger, engine, artnetIn, recorder) {
         sendJson(res, { ok: true });
       });
     }
+    // Manual channel overrides (phone Channel mode).
+    if (url === "/api/manual/set" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        const ok = engine.manualSet(Array.isArray(b.updates) ? b.updates : [], b.fade);
+        if (!ok) return badRequest(res, "the desk is live — channel control is locked", 409);
+        sendJson(res, { ok: true });
+      });
+    }
+    if (url === "/api/manual/clear" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        engine.manualClear(Array.isArray(b && b.channels) ? b.channels : undefined);
+        sendJson(res, { ok: true });
+      });
+    }
+
     if (url === "/api/programmer/clear" && req.method === "POST") {
       engine.programmerClear();
       return sendJson(res, { ok: true });

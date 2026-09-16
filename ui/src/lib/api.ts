@@ -94,9 +94,18 @@ export interface FixturesStatus {
   import: { running: boolean; phase: string | null; done: number; total: number; error: string | null };
 }
 
+// A channel someone has taken over by hand (phone Channel mode). `channel` is 1-based.
+export interface ManualOverride {
+  universe: number;
+  channel: number;
+  value: number; // 0..255 now
+  target: number; // 0..255 where a fade is heading
+}
+
 export interface EngineState {
   universes: number;
   channels: number;
+  manual: ManualOverride[];
   editing?: string | null;
   programmerActive?: boolean;
   programmerFrom?: string[]; // scenes that were live when the programmer took over
@@ -505,6 +514,25 @@ export function programmerSet(updates: { universe: number; channel: number; valu
     body: JSON.stringify({ updates }),
   }).catch(() => {});
 }
+// ---- Manual channel overrides (phone Channel mode) ----
+
+// Fire-and-forget: used while dragging, a lost request is superseded by the next.
+export function manualSet(updates: { universe: number; channel: number; value: number }[], fade = 0) {
+  return fetch("/api/manual/set", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ updates, fade }),
+  }).catch(() => {});
+}
+// Hand channels back to the scenes; no argument = all of them.
+export function manualClear(channels?: { universe: number; channel: number }[]) {
+  return fetch("/api/manual/clear", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(channels ? { channels } : {}),
+  }).catch(() => {});
+}
+
 export function programmerClear() {
   return fetch("/api/programmer/clear", { method: "POST" }).catch(() => {});
 }

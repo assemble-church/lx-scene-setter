@@ -128,6 +128,7 @@ const TYPE_COLOR: Record<string, string> = {
   override: "text-amber-400",
   record: "text-emerald-400",
   sequence: "text-teal-300",
+  manual: "text-violet-300",
 };
 
 function LogLine({ e }: { e: ActivityEvent }) {

@@ -1,0 +1,12 @@
+{
+  "name": "Light It",
+  "short_name": "Light It",
+  "description": "House lighting — scenes, sequences and channel control",
+  "start_url": "/m",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0c0d14",
+  "theme_color": "#0c0d14",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

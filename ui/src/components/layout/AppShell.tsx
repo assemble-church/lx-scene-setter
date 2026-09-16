@@ -13,6 +13,7 @@ import {
   PanelLeftOpen,
   Maximize,
   Minimize,
+  Smartphone,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
@@ -30,6 +31,7 @@ const nav = [
   { to: "/patch", label: "Patch", icon: Plug, end: false },
   { to: "/companion", label: "Companion", icon: Radio, end: false },
   { to: "/config", label: "Config", icon: Settings, end: false },
+  { to: "/m", label: "Mobile", icon: Smartphone, end: false },
 ];
 
 // Universes shown as live mini-grids in the top bar (the first four).
