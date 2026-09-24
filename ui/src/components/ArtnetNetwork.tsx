@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Radar, Plus } from "lucide-react";
+import { Radar, Plus, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -24,8 +24,17 @@ const ago = (t: number) => {
   return s < 2 ? "now" : s < 60 ? `${s}s ago` : `${Math.round(s / 60)}m ago`;
 };
 
-// Art-Net discovery + live senders. `onAdd` appends a node to the (unsaved) outputs.
-export function ArtnetNetwork({ onAdd, port }: { onAdd: (node: OutputNode) => void; port: number }) {
+// Art-Net discovery + live senders. `onAdd` appends a node to the (unsaved) outputs;
+// `outputs` is the form's current list, so discovered nodes already in it are marked.
+export function ArtnetNetwork({
+  onAdd,
+  port,
+  outputs = [],
+}: {
+  onAdd: (node: OutputNode) => void;
+  port: number;
+  outputs?: OutputNode[];
+}) {
   const [net, setNet] = useState<Network | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,6 +90,9 @@ export function ArtnetNetwork({ onAdd, port }: { onAdd: (node: OutputNode) => vo
                     <span className="font-medium">{o.name || "(unnamed)"}</span>
                     <span className="font-mono text-xs tabular-nums">{o.ip || "(blank)"}</span>
                     <Badge variant={m.tone}>{m.label}</Badge>
+                    <span className="text-xs text-muted-foreground" title={(o.universes || []).map(portAddressLabel).join("\n")}>
+                      sends U{(o.universes || []).join(", U") || " —"}
+                    </span>
                     <span className="text-xs text-muted-foreground">
                       {m.detail} · via {o.via.join(", ") || "—"} · {o.packetsPerUpdate} packet
                       {o.packetsPerUpdate === 1 ? "" : "s"} per update
@@ -106,7 +118,9 @@ export function ArtnetNetwork({ onAdd, port }: { onAdd: (node: OutputNode) => vo
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Nodes (ArtPoll replies)</div>
         {net?.nodes.length ? (
           <div className="space-y-1">
-            {net.nodes.map((n) => (
+            {net.nodes.map((n) => {
+              const existing = outputs.find((o) => (o.ip || "").trim() === n.ip);
+              return (
               <div key={`${n.ip}#${n.bindIndex}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-white/[0.08] bg-white/[0.02] px-2 py-1.5 text-sm">
                 <span className="font-mono tabular-nums">{n.ip}</span>
                 <span className="font-medium">{n.shortName || n.longName || "(unnamed)"}</span>
@@ -116,17 +130,24 @@ export function ArtnetNetwork({ onAdd, port }: { onAdd: (node: OutputNode) => vo
                 </span>
                 <span className="ml-auto flex items-center gap-2">
                   <span className="text-[10px] text-muted-foreground">{ago(n.lastSeen)}</span>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={!n.outputs.length}
-                    onClick={() => onAdd({ name: n.shortName || n.longName || n.ip, ip: n.ip, port, universes: n.outputs })}
-                  >
-                    <Plus className="h-4 w-4" /> Add as output
-                  </Button>
+                  {existing ? (
+                    <Badge variant="secondary" title={`Configured above as "${existing.name || n.ip}"`}>
+                      <Check className="mr-1 h-3 w-3" /> already an output
+                    </Badge>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={!n.outputs.length}
+                      onClick={() => onAdd({ name: n.shortName || n.longName || n.ip, ip: n.ip, port, universes: n.outputs })}
+                    >
+                      <Plus className="h-4 w-4" /> Add as output
+                    </Button>
+                  )}
                 </span>
               </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">

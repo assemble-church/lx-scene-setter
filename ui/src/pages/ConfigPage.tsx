@@ -441,6 +441,7 @@ export function ConfigPage() {
               <div className="pt-3">
                 <ArtnetNetwork
                   port={cfg.artnet.port}
+                  outputs={cfg.artnet.outputs}
                   onAdd={(node: OutputNode) => patch("artnet", { outputs: [...cfg.artnet.outputs, node] })}
                 />
               </div>
