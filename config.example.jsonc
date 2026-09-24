@@ -22,8 +22,9 @@
     // has no IP and only takes 255.255.255.255 from a 169.254.x.x sender.
     // Universe = Art-Net Port-Address: Subnet 0/Universe 1 → 1, Subnet 1/Universe 0 → 16.
     "outputs": [
-      { "name": "Chauvet Net-X II", "ip": "10.10.20.1", "port": 6454, "universes": [2, 3, 4, 5] },
-      { "name": "Botex", "ip": "255.255.255.255", "source": "169.254.50.51", "port": 6454, "universes": [0] }
+      { "name": "Roar node", "ip": "10.10.20.3", "port": 6454, "universes": [0, 1] }
+      // A node with no IP (e.g. a Botex DPX NET) needs the broadcast + source form:
+      // { "name": "Botex", "ip": "255.255.255.255", "source": "169.254.50.51", "port": 6454, "universes": [0] }
     ]
   },
 

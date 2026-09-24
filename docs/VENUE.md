@@ -8,14 +8,14 @@ and change it.
 | Network | VLAN | Range | What's on it |
 | --- | --- | --- | --- |
 | Production | 10 | 10.10.10.0/24, router 10.10.10.1 | the Pi (10.10.10.30), Companion, web UI |
-| Production ArtNet | 20 | 10.10.20.0/24 (DHCP) | the Botex dimmer, the Pi's Art-Net interface, later the Avo's Art-Net port |
+| Production ArtNet | 20 | 10.10.20.0/24 (DHCP) | the Roar Art-Net node, the Pi's Art-Net interface, later the Avo's Art-Net port |
 
 Switch ports:
 
 | Port | Native VLAN | Tagged VLANs |
 | --- | --- | --- |
 | Pi | Production (10) | Production ArtNet (20) allowed |
-| Botex | Production ArtNet (20) | Block All |
+| Art-Net nodes (Roar, the new node when it arrives) | Production ArtNet (20) | Block All |
 | Ordinary devices | their network | Block All |
 | Uplinks, access points | as needed | keep the VLANs they carry |
 
@@ -29,7 +29,8 @@ them must be on VLAN 20.
 - **`eth0`:** Production, 10.10.10.30 by DHCP. This is its only default route.
 - **`eth0.20`:** NetworkManager connection `artnet-vlan20`, on VLAN 20.
   - It gets a DHCP address (10.10.20.50), set never-default.
-  - It also has **169.254.50.51/16**, the address the Botex needs packets to come from.
+  - It also has **169.254.50.51/16**, left over from driving the Botex. Harmless; only
+    needed again if a node with no IP address comes back.
 - **Services:** Light It is the `scene-setter` systemd service, web UI on
   http://10.10.10.30:8080. Companion runs on the same Pi, on port 8000.
 - **Config:** `/opt/scene-setter/shared/config.jsonc`
@@ -45,25 +46,27 @@ sudo nmcli connection add type vlan con-name artnet-vlan20 ifname eth0.20 dev et
 sudo nmcli connection up artnet-vlan20
 ```
 
-## The Botex dimmer
+## Art-Net nodes
 
-The Botex DPX-1210T NET is set to Art-Net SubNet 0 / Universe 0, with its channels
-assigned to protocol A. It has **no IP address**. It only responds to
-`255.255.255.255` sent from a 169.254.x.x address. This was proven on 2026-09-15:
-with the app stopped, that one packet form alone took the lamps to full and back to
-off. Every other form was ignored. The README has the full table.
-
-Its output in the config:
+Outputs in the config as of 2026-09-24:
 
 ```jsonc
-{ "name": "Botex", "ip": "255.255.255.255", "source": "169.254.50.51", "port": 6454, "universes": [0] }
+{ "name": "Roar node", "ip": "10.10.20.3", "port": 6454, "universes": [0, 1] }
 ```
 
-That's one packet per update, out of `eth0.20` only. Check it on the Pi:
+- **Roar node:** static 10.10.20.3 on VLAN 20, universes 0 and 1.
+- **Second node (on order):** will take the rest of the rig. It replaces the Chauvet
+  Net-X II, which died in September 2026. Add it as another output once it has an
+  address on VLAN 20.
+- **Botex DPX-1210T NET:** no longer driven from the Pi. Its output was removed on
+  2026-09-24. If it ever comes back, it needs `ip 255.255.255.255` with
+  `source 169.254.50.51` (see the README); the Pi still has that address.
+
+Check what's going out on the Pi:
 
 ```bash
 sudo tcpdump -n -i any udp port 6454
-# eth0.20 Out IP 169.254.50.51.6454 > 255.255.255.255.6454: UDP, length 530
+# eth0.20 Out IP 10.10.20.50.6454 > 10.10.20.3.6454: UDP, length 530
 ```
 
 Nothing should appear on `eth0`.
@@ -72,8 +75,7 @@ Nothing should appear on `eth0`.
 
 - **Config:** the desk IP is `10.10.20.10`, on the Art-Net VLAN. Set the Avo to
   that address, or change **Config → Console IP** to whatever it uses.
-- **Network:** its Art-Net port must be on VLAN 20. To drive the Botex directly, the
-  desk must also send `255.255.255.255` from a 169.254.x.x address.
+- **Network:** its Art-Net port must be on VLAN 20.
 - **Check:** with the desk outputting, the Dashboard shows **Desk live**. Switch it
   off, and after about 1 second the Dashboard shows **Holding desk look**.
 
