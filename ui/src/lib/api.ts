@@ -332,6 +332,15 @@ export function portAddressLabel(u: number) {
 }
 export const BROADCAST_IP = "255.255.255.255";
 
+// One physical DMX socket on a node.
+export interface ArtnetNodePort {
+  port: number; // physical port number on the node (1-based, continues across bind pages)
+  slot: number; // position within this bind page (0-3) — what ArtAddress indexes
+  isOutput: boolean;
+  isInput: boolean;
+  output: number | null; // Port-Address it outputs (i.e. the universe we send it)
+  input: number | null;
+}
 export interface ArtnetNode {
   ip: string;
   from: string; // address the reply came from (can differ from ip, e.g. behind NAT)
@@ -340,6 +349,9 @@ export interface ArtnetNode {
   report: string;
   mac: string;
   bindIndex: number;
+  net: number; // shared by every port in this bind page
+  subnet: number; // likewise — only the per-port nibble can differ
+  ports: ArtnetNodePort[];
   outputs: number[]; // universes it outputs to DMX (i.e. receives from us)
   inputs: number[];
   lastSeen: number;
@@ -361,11 +373,50 @@ export interface ArtnetOutputRoute {
   packetsPerUpdate: number;
   warning?: string;
 }
+// One physical socket on a node, after its replies have been stitched together.
+export interface ArtnetDevicePort {
+  port: number; // physical socket on the box, 1-based
+  bindIndex: number; // which ArtPollReply programs it
+  slot: number; // position within that reply (0-3)
+  net: number;
+  subnet: number;
+  isOutput: boolean;
+  isInput: boolean;
+  output: number | null; // the universe this socket puts out on DMX
+  input: number | null;
+}
+// A physical node. Art-Net fits at most 4 ports in a reply, so a bigger node
+// answers several times; the engine groups those replies back into one device.
+export interface ArtnetDevice {
+  ip: string;
+  from: string;
+  mac: string;
+  name: string;
+  shortName: string;
+  longName: string;
+  report: string;
+  pages: number; // how many replies it answered with
+  lastSeen: number;
+  ports: ArtnetDevicePort[];
+  outputs: number[]; // every universe the box listens for, in port order
+  inputs: number[];
+}
+
+// What a console sees when it discovers us.
+export interface ArtnetSelf {
+  shortName: string;
+  longName: string;
+  universes: number[]; // universes we accept (what a desk can send us to record)
+  deskIp: string;
+  announcingAs: { name: string; address: string; broadcast: string }[];
+}
 export interface ArtnetNetwork {
-  nodes: ArtnetNode[];
+  nodes: ArtnetNode[]; // raw per-reply view
+  devices: ArtnetDevice[]; // replies grouped into physical boxes — prefer this
   senders: ArtnetSender[];
   interfaces: { name: string; address: string; netmask: string; broadcast: string }[];
   outputs: ArtnetOutputRoute[];
+  self?: ArtnetSelf;
   polled?: string[];
 }
 
@@ -377,6 +428,22 @@ export async function getArtnetNetwork(): Promise<ArtnetNetwork> {
 // Broadcasts ArtPoll and resolves ~3s later with everything that answered.
 export function discoverArtnet() {
   return postJson<ArtnetNetwork>("/api/artnet/discover", {});
+}
+
+// Program a node's DMX ports over the network (ArtAddress). One call programs one
+// block of 4 ports, which must share a Net and Subnet: `swOut` is each port's
+// universe nibble (0-15) within that subnet. Resolves with a fresh poll.
+export function setNodePortAddresses(body: {
+  ip: string;
+  bindIndex: number; // one call programs one reply's block of ports
+  net: number;
+  subnet: number;
+  swOut: (number | null)[];
+  shortName?: string;
+  longName?: string;
+  port?: number;
+}) {
+  return postJson<ArtnetNetwork & { ok: true }>("/api/artnet/node/address", body);
 }
 
 export async function getConfigForm(): Promise<ConfigShape> {
@@ -591,6 +658,10 @@ export function patchUpdate(
     channels: { type: ChannelType; fade: boolean; name: string; remap?: LedRemap }[];
     icon: FixtureKind;
     heads: FixtureHead[] | null; // null merges back to a single head
+    // Swap the fixture for a different one in place, keeping its label and
+    // address. Resets per-channel names, types and remaps, since those described
+    // the old fixture. Scenes are unaffected: they store DMX by channel.
+    retemplate: { builtin: "dimmer"; channels: number; switched?: number } | { libId: number; mode?: string };
   }>
 ) {
   return postJson<{ fixtures: PatchFixture[] }>(`/api/patch/${encodeURIComponent(id)}`, body);

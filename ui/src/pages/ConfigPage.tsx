@@ -10,10 +10,7 @@ import {
   getConfig,
   saveConfig,
   restartService,
-  portAddressLabel,
-  BROADCAST_IP,
   type ConfigShape,
-  type OutputNode,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ArtnetNetwork } from "@/components/ArtnetNetwork";
@@ -304,145 +301,17 @@ export function ConfigPage() {
                 />
               </Row>
               <div className="pt-2">
-                <div className="mb-1 text-sm">Output nodes</div>
                 <div className="mb-2 text-xs text-muted-foreground">
                   Universe numbers are the Art-Net Port-Address: a node set to Subnet 0 / Universe 0 is
-                  universe 0, Subnet 0 / Universe 1 is 1, Subnet 1 / Universe 0 is 16. For the IP, use
-                  the node's <b>own IP</b> where you can — only that node receives the traffic. If you
-                  don't know it, use its network's broadcast address (e.g. <code>169.254.255.255</code> for
-                  a node that gives itself a 169.254.x.x address, like a Botex DPX NET), or leave it blank /
-                  press <b>Broadcast</b> — then every device on the network receives the packets. See
-                  "How outputs are sent" below.
+                  universe 0, Subnet 0 / Universe 1 is 1, Subnet 1 / Universe 0 is 16. For a node's IP use
+                  its <b>own address</b> where you can, so only that node receives the traffic. If you
+                  don't know it, press <b>Broadcast</b> and every device on the network receives the
+                  packets. Discover the nodes below to set their DMX ports without leaving this page.
                 </div>
-                <div className="space-y-2">
-                  {cfg.artnet.outputs.map((o, i) => (
-                    <div key={i} className="space-y-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Input
-                        placeholder="Name"
-                        value={o.name}
-                        onChange={(e) =>
-                          patch("artnet", {
-                            outputs: cfg.artnet.outputs.map((x, idx) =>
-                              idx === i ? { ...x, name: e.target.value } : x
-                            ),
-                          })
-                        }
-                        className="h-8 w-36"
-                      />
-                      <Input
-                        placeholder="blank = broadcast"
-                        value={o.ip}
-                        onChange={(e) =>
-                          patch("artnet", {
-                            outputs: cfg.artnet.outputs.map((x, idx) =>
-                              idx === i ? { ...x, ip: e.target.value } : x
-                            ),
-                          })
-                        }
-                        className="h-8 w-32"
-                      />
-                      <Input
-                        placeholder="send from: auto"
-                        title="Optional: send only from this address of this machine, one packet per update (e.g. 169.254.50.51 on the Art-Net VLAN for a Botex). Blank = automatic."
-                        value={o.source ?? ""}
-                        onChange={(e) =>
-                          patch("artnet", {
-                            outputs: cfg.artnet.outputs.map((x, idx) =>
-                              idx === i ? { ...x, source: e.target.value } : x
-                            ),
-                          })
-                        }
-                        className="h-8 w-36"
-                      />
-                      <Button
-                        size="sm"
-                        variant={o.ip === BROADCAST_IP ? "secondary" : "outline"}
-                        title="Send to every Art-Net node on the network (no IP needed)"
-                        onClick={() =>
-                          patch("artnet", {
-                            outputs: cfg.artnet.outputs.map((x, idx) =>
-                              idx === i ? { ...x, ip: BROADCAST_IP } : x
-                            ),
-                          })
-                        }
-                      >
-                        Broadcast
-                      </Button>
-                      <Input
-                        type="number"
-                        placeholder="Port"
-                        value={o.port ?? cfg.artnet.port}
-                        onChange={(e) =>
-                          patch("artnet", {
-                            outputs: cfg.artnet.outputs.map((x, idx) =>
-                              idx === i ? { ...x, port: Number(e.target.value) } : x
-                            ),
-                          })
-                        }
-                        className="h-8 w-24"
-                      />
-                      <Input
-                        placeholder="Universes e.g. 2,3,4"
-                        value={o.universes.join(", ")}
-                        onChange={(e) =>
-                          patch("artnet", {
-                            outputs: cfg.artnet.outputs.map((x, idx) =>
-                              idx === i
-                                ? {
-                                    ...x,
-                                    universes: e.target.value
-                                      .split(",")
-                                      .map((s) => Number(s.trim()))
-                                      .filter((n) => Number.isFinite(n)),
-                                  }
-                                : x
-                            ),
-                          })
-                        }
-                        className="h-8 w-44"
-                      />
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() =>
-                          patch("artnet", {
-                            outputs: cfg.artnet.outputs.filter((_, idx) => idx !== i),
-                          })
-                        }
-                      >
-                        <Trash2 className="h-4 w-4 text-destructive" />
-                      </Button>
-                    </div>
-                    {o.universes.length > 0 && (
-                      <div className="pl-1 text-[11px] text-muted-foreground">
-                        {o.universes.map((u) => `U${u} = ${portAddressLabel(u)}`).join("  ·  ")}
-                        {(!o.ip.trim() || o.ip === BROADCAST_IP) && (o.source?.trim() ? `  —  one broadcast, sent from ${o.source.trim()}` : "  —  broadcast to all nodes (no IP needed)")}
-                      </div>
-                    )}
-                    </div>
-                  ))}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      patch("artnet", {
-                        outputs: [
-                          ...cfg.artnet.outputs,
-                          { name: "", ip: "", port: cfg.artnet.port, universes: [] },
-                        ],
-                      })
-                    }
-                  >
-                    <Plus className="h-4 w-4" /> Add node
-                  </Button>
-                </div>
-              </div>
-              <div className="pt-3">
                 <ArtnetNetwork
                   port={cfg.artnet.port}
                   outputs={cfg.artnet.outputs}
-                  onAdd={(node: OutputNode) => patch("artnet", { outputs: [...cfg.artnet.outputs, node] })}
+                  onChangeOutputs={(next) => patch("artnet", { outputs: next })}
                 />
               </div>
             </Section>

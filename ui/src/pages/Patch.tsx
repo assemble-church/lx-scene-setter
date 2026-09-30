@@ -475,6 +475,176 @@ function RemapCurve({ r }: { r: LedRemap }) {
 // Min / max / curve / speed for one led channel, with a live test fader that
 // drives the real channel (by hand, on top of the scenes) so the lamp can be
 // watched. The fader runs across the lamp's band: bottom = min, top = max.
+// Change what a patched fixture IS, in place: a dimmer pack's channel count, or a
+// library fixture's mode. Label, universe and address stay put, so you don't have
+// to delete and re-patch when the hardware is swapped.
+function EditFixtureDialog({
+  entry,
+  total,
+  onClose,
+  onSaved,
+}: {
+  entry: PatchFixture | null;
+  total: number;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const isDimmer = !!entry && entry.libId == null;
+  const [channels, setChannels] = useState(1);
+  const [switched, setSwitched] = useState(0);
+  const [mode, setMode] = useState("");
+  const [lib, setLib] = useState<Fixture | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!entry) return;
+    setError(null);
+    setChannels(entry.channels);
+    // The template makes the LAST n channels switched, so count the trailing run
+    // rather than every switch channel the user may have set by hand.
+    let n = 0;
+    for (let i = (entry.types || []).length - 1; i >= 0 && entry.types[i] === "switch"; i--) n++;
+    setSwitched(n);
+    setMode(entry.mode);
+    setLib(null);
+    if (entry.libId != null) {
+      getFixture(entry.libId)
+        .then(setLib)
+        .catch(() => setLib(null));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entry?.id]);
+
+  if (!entry) return null;
+
+  const last = entry.address + channels - 1;
+  const overruns = last > total;
+  const dimmed = Math.max(0, channels - switched);
+  const changed = isDimmer
+    ? channels !== entry.channels ||
+      switched !== (() => {
+        let n = 0;
+        for (let i = (entry.types || []).length - 1; i >= 0 && entry.types[i] === "switch"; i--) n++;
+        return n;
+      })()
+    : mode !== entry.mode;
+
+  async function save() {
+    if (!entry) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await patchUpdate(entry.id, {
+        retemplate: isDimmer ? { builtin: "dimmer", channels, switched } : { libId: entry.libId as number, mode },
+      });
+      onSaved();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={!!entry} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Edit {entry.label}</DialogTitle>
+          <DialogDescription>
+            {isDimmer
+              ? "Change the size of this dimmer pack. It keeps its name and start address."
+              : "Change this fixture's mode. It keeps its name and start address."}
+          </DialogDescription>
+        </DialogHeader>
+        {error && <p className="text-sm text-destructive">{error}</p>}
+        <div className="space-y-3">
+          {isDimmer ? (
+            <div className="flex flex-wrap gap-3">
+              <label className="text-sm">
+                Channels
+                <Input
+                  type="number"
+                  className="mt-1 w-24"
+                  value={channels}
+                  min={1}
+                  max={total}
+                  onChange={(e) => {
+                    const n = Math.max(1, Math.min(total, Number(e.target.value) || 1));
+                    setChannels(n);
+                    setSwitched((sw) => Math.min(sw, n));
+                  }}
+                />
+              </label>
+              <label className="text-sm">
+                Switched (last)
+                <Input
+                  type="number"
+                  className="mt-1 w-24"
+                  value={switched}
+                  min={0}
+                  max={channels}
+                  onChange={(e) => setSwitched(Math.max(0, Math.min(channels, Number(e.target.value) || 0)))}
+                />
+              </label>
+            </div>
+          ) : (
+            <label className="block text-sm">
+              Mode
+              <Select value={mode} onValueChange={setMode}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue placeholder={entry.mode} />
+                </SelectTrigger>
+                <SelectContent>
+                  {(lib?.modes || []).map((m) => (
+                    <SelectItem key={m.name} value={m.name}>
+                      {m.name} · {m.channels} ch
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {!lib && <span className="mt-1 block text-xs text-muted-foreground">Loading modes…</span>}
+            </label>
+          )}
+          <div className="text-xs text-muted-foreground">
+            Was {entry.channels} ch · now U{entry.universe}/{entry.address}–{last}
+            {isDimmer && (
+              <>
+                {": "}
+                {dimmed > 0 && `ch ${entry.address}–${entry.address + dimmed - 1} dimmed`}
+                {dimmed > 0 && switched > 0 && ", "}
+                {switched > 0 && `ch ${entry.address + dimmed}–${last} switched`}
+              </>
+            )}
+          </div>
+          {overruns && (
+            <p className="text-sm text-destructive">
+              That runs past the end of the universe. Move the fixture to a lower address first.
+            </p>
+          )}
+          {changed && !overruns && (
+            <p className="text-xs text-muted-foreground">
+              {isDimmer
+                ? "Channel names you typed yourself are kept; switch/dim types follow the settings above, and any LED remaps are reset."
+                : "Per-channel names, types and LED remaps are reset, since they described the old mode."}{" "}
+              Scenes are unaffected, because they store levels by channel rather than by fixture.
+            </p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={save} disabled={busy || overruns || !changed}>
+            {busy ? "Saving…" : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function RemapEditor({
   r,
   onChange,
@@ -900,6 +1070,7 @@ export function Patch() {
   const [adding, setAdding] = useState<FixtureHit | null>(null);
   const [channelEdit, setChannelEdit] = useState<PatchFixture | null>(null);
   const [iconEdit, setIconEdit] = useState<PatchFixture | null>(null);
+  const [fixtureEdit, setFixtureEdit] = useState<PatchFixture | null>(null);
   const [addingDimmer, setAddingDimmer] = useState(false);
 
   const refresh = () => getPatch().then((p) => setPatch(p.fixtures)).catch(() => {});
@@ -1043,7 +1214,15 @@ export function Patch() {
                     <td className="px-4 py-2 text-muted-foreground">
                       {fx.manufacturer} {fx.name}
                     </td>
-                    <td className="px-4 py-2 text-muted-foreground">{fx.mode}</td>
+                    <td className="px-4 py-2">
+                      <button
+                        onClick={() => setFixtureEdit(fx)}
+                        title="Change the fixture or its channel count"
+                        className="rounded-md border border-border/60 px-2 py-1 text-muted-foreground hover:border-foreground/40 hover:text-foreground"
+                      >
+                        {fx.mode}
+                      </button>
+                    </td>
                     <td className="px-4 py-2">
                       <Input
                         type="number"
@@ -1107,6 +1286,12 @@ export function Patch() {
         onAdded={refresh}
       />
       <ChannelsDialog entry={channelEdit} onClose={() => setChannelEdit(null)} onSaved={refresh} />
+      <EditFixtureDialog
+        entry={fixtureEdit}
+        total={channels}
+        onClose={() => setFixtureEdit(null)}
+        onSaved={refresh}
+      />
       <IconsDialog entry={iconEdit} onClose={() => setIconEdit(null)} onSaved={refresh} />
     </div>
   );

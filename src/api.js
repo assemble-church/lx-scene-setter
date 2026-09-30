@@ -399,6 +399,58 @@ function createApi(config, logger, engine, artnetIn, recorder) {
       return;
     }
 
+    // POST /api/artnet/node/address — program a node's Port-Addresses over the
+    // network (ArtAddress), so a node's DMX ports can be assigned from here
+    // instead of on the node's own web page.
+    //
+    // Art-Net packs a 15-bit Port-Address as Net (bits 14-8) + Subnet (7-4) +
+    // per-port Universe (3-0), and one ArtAddress programs one block of 4 ports.
+    // So the 4 ports addressed together must share a Net and Subnet: only their
+    // low nibble can differ. `swOut` is that nibble per port, null to leave a
+    // port at zero.
+    if (url === "/api/artnet/node/address" && req.method === "POST") {
+      return readBody(req, res, (b) => {
+        const ip = typeof b.ip === "string" ? b.ip.trim() : "";
+        if (!ip) return badRequest(res, "ip required");
+        const net = Number(b.net) || 0;
+        const subnet = Number(b.subnet) || 0;
+        if (!Number.isInteger(net) || net < 0 || net > 127) return badRequest(res, "net must be 0-127");
+        if (!Number.isInteger(subnet) || subnet < 0 || subnet > 15) return badRequest(res, "subnet must be 0-15");
+        const swOut = (Array.isArray(b.swOut) ? b.swOut : []).slice(0, 4).map((v) =>
+          v === null || v === undefined || v === "" ? null : Number(v)
+        );
+        for (const v of swOut) {
+          if (v === null) continue;
+          if (!Number.isInteger(v) || v < 0 || v > 15) return badRequest(res, "each port's universe must be 0-15 within its subnet");
+        }
+        const bindIndex = Number(b.bindIndex) || 1;
+        Promise.resolve()
+          .then(() =>
+            artnetIn.setNodeAddress({
+              ip,
+              port: Number(b.port) || undefined,
+              bindIndex,
+              net,
+              subnet,
+              swOut,
+              shortName: b.shortName,
+              longName: b.longName,
+            })
+          )
+          .then(() => {
+            logger.info(
+              `ArtAddress to ${ip} (bind ${bindIndex}): net ${net}, subnet ${subnet}, ports [${swOut.join(", ")}]`
+            );
+            // Let the node apply it, then re-poll so the UI shows what it actually did.
+            setTimeout(() => {
+              artnetIn.poll();
+              setTimeout(() => sendJson(res, { ok: true, ...artnetIn.getNodes() }), 1800);
+            }, 400);
+          })
+          .catch((err) => badRequest(res, err.message));
+      });
+    }
+
     // ---- Fixture library ----
     if (url === "/api/fixtures/status" && req.method === "GET") {
       return sendJson(res, fixturesStatus());
@@ -611,6 +663,82 @@ function createApi(config, logger, engine, artnetIn, recorder) {
         if (b.universe !== undefined) fx.universe = b.universe | 0;
         if (b.address !== undefined) fx.address = Math.max(1, b.address | 0);
         if (typeof b.label === "string") fx.label = b.label;
+
+        // Re-template: the fixture itself changed, e.g. a 12-way dimmer pack
+        // swapped for an 8-way, or a library fixture moved to another mode.
+        // Everything describing the fixture is replaced, while its id, label and
+        // position are kept — scenes address DMX by universe and channel, not by
+        // fixture, so existing scenes keep working. Per-channel tweaks (custom
+        // names, switch/LED types, remaps) are reset, because they described the
+        // old fixture's channels.
+        //   { retemplate: { builtin: "dimmer", channels, switched? } }
+        //   { retemplate: { libId, mode? } }
+        if (b.retemplate && typeof b.retemplate === "object") {
+          const t = b.retemplate;
+          let template;
+          if (t.builtin === "dimmer") {
+            template = dimmerPackTemplate(t.channels, t.switched);
+            if (!template) return badRequest(res, `channels must be 1–${config.channels}, switched 0–channels`);
+          } else if (t.libId !== undefined) {
+            const l = library();
+            if (!l) return badRequest(res, "No fixture library imported");
+            const src = lib.get(l, Number(t.libId));
+            if (!src) return badRequest(res, "fixture not found", 404);
+            const mode = (src.modes || []).find((m) => m.name === t.mode) || (src.modes || [])[0];
+            if (!mode) return badRequest(res, "fixture has no modes");
+            const fade = lib.channelFade(mode);
+            const channels = mode.channels || fade.length || 1;
+            template = {
+              libId: src.id,
+              manufacturer: src.manufacturer,
+              name: src.name,
+              mode: mode.name,
+              channels,
+              fade,
+              letters: lib.channelLetters(mode),
+              names: lib.channelNames(mode),
+              types: new Array(channels).fill("level"),
+              icon: guessIcon(src),
+              heads: computeHeads(mode),
+            };
+          } else {
+            return badRequest(res, "retemplate needs either builtin: \"dimmer\" or a libId");
+          }
+          if (template.channels > config.channels) return badRequest(res, "Fixture is larger than one universe");
+          if (fx.address + template.channels - 1 > config.channels) {
+            return badRequest(
+              res,
+              `${template.channels} channels from address ${fx.address} runs past the end of the universe — move it first`
+            );
+          }
+          // Keep names the user typed. A dimmer pack's generated names are always
+          // "Dimmer n" / "Power n", so anything else is theirs and survives the
+          // swap; a library fixture's channel layout changes with the mode, so
+          // its names come fresh from the new personality.
+          const generated = /^(Dimmer|Power) \d+$/;
+          const names = [...template.names];
+          const heads = template.heads ? template.heads.map((h) => ({ ...h })) : undefined;
+          if (t.builtin === "dimmer") {
+            for (let i = 0; i < template.channels && i < (fx.names || []).length; i++) {
+              const was = fx.names[i];
+              if (!was || generated.test(was)) continue;
+              names[i] = was;
+              const head = (heads || []).find((h) => h.offset === i + 1 && h.span === 1);
+              if (head) head.label = was;
+            }
+          }
+          Object.assign(fx, {
+            ...template,
+            // own copies, so later per-channel edits don't mutate the template
+            fade: [...template.fade],
+            types: [...template.types],
+            names,
+            letters: [...template.letters],
+            heads,
+            remaps: new Array(template.channels).fill(null),
+          });
+        }
+
         if (Array.isArray(b.fade)) fx.fade = b.fade.map((x) => x !== false);
         // channels: [{ type, fade, name? }] per channel, in offset order.
         if (Array.isArray(b.channels)) {

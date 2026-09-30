@@ -24,7 +24,18 @@ const HEADER_LEN = 18;
 const OP_DMX = 0x5000;
 const OP_POLL = 0x2000;
 const OP_POLLREPLY = 0x2100;
+const OP_ADDRESS = 0x6000;
+const ADDRESS_LEN = 107;
+// How often we re-announce ourselves to the network (unsolicited ArtPollReply).
+const ANNOUNCE_INTERVAL_MS = 15000;
+// Never broadcast an unsolicited reply more often than this, so a controller
+// polling in a tight loop can't turn into a broadcast storm.
+const ANNOUNCE_MIN_GAP_MS = 2000;
 const ARTNET_ID = "Art-Net\0";
+// How we announce ourselves to consoles. Kept here so the UI can show the desk
+// exactly the name and universes it will see.
+const NODE_SHORT_NAME = "Light It";
+const NODE_LONG_NAME = "Light It - Assembly Rooms house lighting";
 const POLLREPLY_LEN = 239;
 
 // IPv4 interfaces with their directed-broadcast address.
@@ -89,7 +100,7 @@ function createArtnetOutput(config, logger) {
       for (const [addr, iface] of current) {
         if (ifaceSockets.has(addr)) continue;
         const s = dgram.createSocket({ type: "udp4", reuseAddr: true });
-        const entry = { socket: s, name: iface.name, address: addr, netmask: iface.netmask, broadcast: iface.broadcast, ready: false };
+        const entry = { socket: s, name: iface.name, address: addr, netmask: iface.netmask, mac: iface.mac, broadcast: iface.broadcast, ready: false };
         s.on("error", (err) => logger.error(`Art-Net socket ${addr}:${config.artnetPort} error:`, err.message));
         s.on("message", (msg, rinfo) => receivers.forEach((fn) => fn(msg, rinfo)));
         s.bind(config.artnetPort, addr, () => {
@@ -238,6 +249,20 @@ function createArtnetOutput(config, logger) {
     });
   }
 
+  // Every interface we can send from. An ArtPollReply has to carry the address of
+  // the interface it leaves by, so the caller builds one packet per interface
+  // rather than handing us a single packet to spray everywhere.
+  function interfaces() {
+    return interfaceSockets().map((e) => ({
+      name: e.name,
+      address: e.address,
+      netmask: e.netmask,
+      mac: e.mac,
+      broadcast: e.broadcast,
+      send: (packet, port, dest) => send(e.socket, packet, port, dest, `${dest} via ${e.name} ${e.address}`),
+    }));
+  }
+
   function close() {
     for (const s of [socket, ...[...ifaceSockets.values()].map((e) => e.socket)]) {
       try {
@@ -248,7 +273,7 @@ function createArtnetOutput(config, logger) {
     }
   }
 
-  return { sendUniverse, broadcast, describeOutputs, onMessage, close };
+  return { sendUniverse, broadcast, describeOutputs, onMessage, interfaces, close };
 }
 
 // Pick the local IPv4 interface facing the desk (same /24), else the first
@@ -298,8 +323,8 @@ function buildPollReply(config, localIp, mac, universes, page) {
   buf[22] = 0; // Ubea
   buf[23] = 0xd0; // Status1: indicators normal
   buf.writeUInt16LE(0x0000, 24); // EstaMan (Lo,Hi)
-  buf.write("Light It", 26, 17, "ascii"); // ShortName
-  buf.write("Light It - Assembly Rooms house lighting", 44, 63, "ascii"); // LongName
+  buf.write(NODE_SHORT_NAME, 26, 17, "ascii"); // ShortName
+  buf.write(NODE_LONG_NAME, 44, 63, "ascii"); // LongName
   buf.write(`#0001 [${page}] Light It OK`, 108, 63, "ascii"); // NodeReport
   buf.writeUInt16BE(pageUnis.length, 172); // NumPorts (Hi,Lo)
   for (let i = 0; i < pageUnis.length; i++) {
@@ -319,6 +344,33 @@ function buildPollReply(config, localIp, mac, universes, page) {
   return buf;
 }
 
+// Build an ArtAddress packet: programs a node's Port-Addresses, and optionally its
+// names. Art-Net encodes a 15-bit Port-Address as Net (bits 14-8), Subnet (7-4)
+// and the per-port Universe nibble (3-0), so the four ports of one bind page must
+// share a Net and Subnet — only their low nibble differs.
+//
+// Every numeric field is "ignored unless bit 7 is set"; sending 0x00 resets it to
+// zero. We always send an explicit value so the result is exactly what was asked
+// for, and leave the name fields zeroed when the caller doesn't supply one.
+function buildAddress({ bindIndex = 1, net = 0, subnet = 0, swOut = [], swIn = [], shortName, longName, command = 0 }) {
+  const buf = Buffer.alloc(ADDRESS_LEN);
+  const prog = (v) => (v === undefined || v === null ? 0x00 : 0x80 | (Number(v) & 0x0f));
+  buf.write(ARTNET_ID, 0, "ascii");
+  buf.writeUInt16LE(OP_ADDRESS, 8);
+  buf[10] = 0; // ProtVerHi
+  buf[11] = 14; // ProtVerLo
+  buf[12] = 0x80 | (Number(net) & 0x7f); // NetSwitch
+  buf[13] = bindIndex || 1; // BindIndex: which block of 4 ports we're programming
+  if (shortName) buf.write(String(shortName).slice(0, 17), 14, 17, "ascii");
+  if (longName) buf.write(String(longName).slice(0, 63), 32, 63, "ascii");
+  for (let i = 0; i < 4; i++) buf[96 + i] = prog(swIn[i]);
+  for (let i = 0; i < 4; i++) buf[100 + i] = prog(swOut[i]);
+  buf[104] = 0x80 | (Number(subnet) & 0x0f); // SubSwitch
+  buf[105] = 0; // SwVideo (deprecated)
+  buf[106] = command & 0xff; // 0 = AcNone
+  return buf;
+}
+
 // Parse an ArtPollReply into a plain node description.
 function parsePollReply(packet, rinfo) {
   if (packet.length < 212) return null;
@@ -326,12 +378,30 @@ function parsePollReply(packet, rinfo) {
   const net = packet[18] & 0x7f;
   const sub = packet[19] & 0x0f;
   const numPorts = Math.min(4, packet.readUInt16BE(172));
+  const bindIndex = packet[211] || 1;
   const outputs = [];
   const inputs = [];
+  // Per-port detail for THIS reply only. A reply carries at most 4 ports, so a
+  // bigger node answers several times (one per "bind page"). How many ports each
+  // reply carries is up to the node: a NET8 sends 8 replies of 1 port each, while
+  // others send 2 replies of 4. So the physical port number can't be worked out
+  // here — it's the running count across a device's replies, done in getNodes().
+  const ports = [];
   for (let i = 0; i < numPorts; i++) {
     const type = packet[174 + i];
-    if (type & 0x80) outputs.push((net << 8) | (sub << 4) | (packet[190 + i] & 0x0f)); // can output DMX
-    if (type & 0x40) inputs.push((net << 8) | (sub << 4) | (packet[186 + i] & 0x0f)); // can input DMX
+    const isOutput = !!(type & 0x80);
+    const isInput = !!(type & 0x40);
+    const outAddr = (net << 8) | (sub << 4) | (packet[190 + i] & 0x0f);
+    const inAddr = (net << 8) | (sub << 4) | (packet[186 + i] & 0x0f);
+    if (isOutput) outputs.push(outAddr); // can output DMX
+    if (isInput) inputs.push(inAddr); // can input DMX
+    ports.push({
+      slot: i, // position within this reply (0-3) — what ArtAddress indexes
+      isOutput,
+      isInput,
+      output: isOutput ? outAddr : null,
+      input: isInput ? inAddr : null,
+    });
   }
   return {
     ip: [packet[10], packet[11], packet[12], packet[13]].join("."),
@@ -340,7 +410,11 @@ function parsePollReply(packet, rinfo) {
     longName: str(44, 64),
     report: str(108, 64),
     mac: [...packet.subarray(201, 207)].map((b) => b.toString(16).padStart(2, "0")).join(":"),
-    bindIndex: packet[211] || 1,
+    bindIndex,
+    net,
+    subnet: sub,
+    numPorts,
+    ports,
     outputs,
     inputs,
   };
@@ -396,12 +470,93 @@ function createArtnetInput(config, logger, onDmx, output) {
       .map((s) => ({ ip: s.ip, isConsole: s.isConsole, universes: [...s.universes].sort((a, b) => a - b), agoMs: Date.now() - s.lastSeen }));
   }
 
+  // Program a node's Port-Addresses over the network (ArtAddress). Sent from our
+  // :6454 socket because some nodes ignore Art-Net from any other source port.
+  // The node answers with a fresh ArtPollReply, which refreshes our node list.
+  function setNodeAddress(opts) {
+    if (!opts || !opts.ip) throw new Error("ip required");
+    const packet = buildAddress(opts);
+    return new Promise((resolve, reject) => {
+      socket.send(packet, opts.port || config.artnetPort, opts.ip, (err) => (err ? reject(err) : resolve()));
+    });
+  }
+
+  // What a console sees when it discovers us: the name, the universes we accept,
+  // and the address we announce on each network. A desk on the Art-Net VLAN sees
+  // the address of the interface facing it, not the Pi's "main" address.
+  function getSelf() {
+    const ifaces = output ? output.interfaces() : localInterfaces();
+    return {
+      shortName: NODE_SHORT_NAME,
+      longName: NODE_LONG_NAME,
+      universes: advertised,
+      deskIp: config.consoleIp,
+      announcingAs: ifaces.map((i) => ({ name: i.name, address: i.address, broadcast: i.broadcast })),
+    };
+  }
+
+  // One physical box often answers ArtPoll several times, because a reply can
+  // only describe 4 ports. Group those replies back into devices, so an 8-port
+  // node reads as one node with 8 sockets instead of 8 separate nodes.
+  //
+  // Physical port numbers are the running count of ports across a device's
+  // replies, ordered by BindIndex. They are NOT bindIndex * 4: a node that sends
+  // one reply per port would then number its 6th port as 21.
+  function getDevices() {
+    const byIp = new Map();
+    for (const n of nodes.values()) {
+      if (!byIp.has(n.ip)) byIp.set(n.ip, []);
+      byIp.get(n.ip).push(n);
+    }
+    return [...byIp.entries()]
+      .map(([ip, pages]) => {
+        pages.sort((a, b) => a.bindIndex - b.bindIndex);
+        const ports = [];
+        let counted = 0;
+        for (const page of pages) {
+          for (const port of page.ports) {
+            ports.push({
+              ...port,
+              port: counted + port.slot + 1, // physical socket on the box
+              bindIndex: page.bindIndex, // which reply programs it
+              net: page.net,
+              subnet: page.subnet,
+            });
+          }
+          counted += page.ports.length;
+        }
+        const first = pages[0];
+        const longNames = [...new Set(pages.map((p) => p.longName).filter(Boolean))];
+        const shortNames = [...new Set(pages.map((p) => p.shortName).filter(Boolean))];
+        // Nodes that name each reply after its own port ("Port 1".."Port 8") give
+        // a useless device name, so prefer a name every reply agrees on.
+        const agreed = (list) => (list.length === 1 ? list[0] : "");
+        return {
+          ip,
+          from: first.from,
+          mac: first.mac,
+          name: agreed(longNames) || agreed(shortNames) || first.longName || first.shortName || ip,
+          shortName: agreed(shortNames),
+          longName: agreed(longNames) || first.longName,
+          report: first.report,
+          pages: pages.length,
+          lastSeen: Math.max(...pages.map((p) => p.lastSeen || 0)),
+          ports,
+          outputs: ports.filter((p) => p.isOutput && p.output !== null).map((p) => p.output),
+          inputs: ports.filter((p) => p.isInput && p.input !== null).map((p) => p.input),
+        };
+      })
+      .sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }));
+  }
+
   function getNodes() {
     return {
       nodes: [...nodes.values()].sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }) || a.bindIndex - b.bindIndex),
       senders: [...senders.values()].map((s) => ({ ...s, universes: [...s.universes].sort((a, b) => a - b) })),
       interfaces: localInterfaces().map(({ name, address, netmask, broadcast }) => ({ name, address, netmask, broadcast })),
+      devices: getDevices(),
       outputs: output ? output.describeOutputs(config.outputs) : [],
+      self: getSelf(),
     };
   }
 
@@ -416,19 +571,53 @@ function createArtnetInput(config, logger, onDmx, output) {
     .filter((u) => Number.isInteger(u) && u >= 0 && u < 32768)
     .sort((a, b) => a - b);
 
+  let announceTimer = null;
   const iface = pickIface(config.consoleIp);
   const localIp = config.artnetIp || (iface && iface.address) || "0.0.0.0";
   const mac = iface && iface.mac;
   const seenUniverses = new Set();
 
-  function sendPollReplies(rinfo) {
+  // One ArtPollReply per block of 4 advertised universes, describing us as seen
+  // from `localIp`.
+  function replyPages(fromIp, fromMac) {
     const pages = Math.max(1, Math.ceil(advertised.length / 4));
-    for (let p = 0; p < pages; p++) {
-      const reply = buildPollReply(config, localIp, mac, advertised, p);
+    return Array.from({ length: pages }, (_, p) => buildPollReply(config, fromIp || localIp, fromMac || mac, advertised, p));
+  }
+
+  // Broadcast who we are out of every interface, unprompted. Art-Net nodes are
+  // meant to do this at power-up and whenever their state changes, and some
+  // consoles (Avolites) only list nodes they have heard announce themselves —
+  // they never poll, so a node that answers polls and nothing else stays
+  // invisible. Each interface advertises its own address, so the IP inside the
+  // packet matches the address it was sent from.
+  let lastAnnounceAt = 0;
+  function announce(force) {
+    if (!advertised.length) return;
+    const now = Date.now();
+    if (!force && now - lastAnnounceAt < ANNOUNCE_MIN_GAP_MS) return;
+    lastAnnounceAt = now;
+    const ifaces = output ? output.interfaces() : localInterfaces();
+    for (const i of ifaces) {
+      for (const reply of replyPages(i.address, i.mac)) {
+        if (i.send) i.send(reply, config.artnetPort, i.broadcast);
+        else
+          socket.send(reply, config.artnetPort, i.broadcast, (err) => {
+            if (err) logger.warn(`ArtPollReply broadcast to ${i.broadcast} failed: ${err.message}`);
+          });
+      }
+    }
+  }
+
+  // Answer a poll: unicast straight back to whoever asked (what a polling
+  // controller expects), then broadcast so listen-only controllers see us too.
+  function sendPollReplies(rinfo) {
+    const from = pickIface(rinfo.address) || {};
+    for (const reply of replyPages(from.address, from.mac)) {
       socket.send(reply, config.artnetPort, rinfo.address, (err) => {
         if (err) logger.error(`ArtPollReply to ${rinfo.address} failed:`, err.message);
       });
     }
+    announce();
   }
 
   function handleMessage(packet, rinfo) {
@@ -491,10 +680,17 @@ function createArtnetInput(config, logger, onDmx, output) {
       logger.info(
         `ArtPoll: advertising output universes [${advertised.join(",")}] as ${localIp}`
       );
+      // Announce at power-up, repeated in case the desk is still booting, then
+      // keep announcing so a console started later lists us without polling.
+      for (const ms of [200, 2000, 6000]) setTimeout(() => announce(true), ms).unref?.();
+      announceTimer = setInterval(announce, ANNOUNCE_INTERVAL_MS);
+      announceTimer.unref?.();
     }
   });
 
   function close() {
+    if (announceTimer) clearInterval(announceTimer);
+    announceTimer = null;
     try {
       socket.close();
     } catch (_) {
@@ -502,7 +698,7 @@ function createArtnetInput(config, logger, onDmx, output) {
     }
   }
 
-  return { close, poll, getNodes, getSenders };
+  return { close, poll, getNodes, getDevices, getSenders, getSelf, setNodeAddress, announce };
 }
 
-module.exports = { createArtnetOutput, createArtnetInput, buildPollReply, parsePollReply };
+module.exports = { createArtnetOutput, createArtnetInput, buildPollReply, buildAddress, parsePollReply };

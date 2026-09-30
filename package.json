@@ -13,7 +13,7 @@
     "dev:ui": "npm --prefix ui run dev",
     "ui:build": "npm --prefix ui run build",
     "build": "npm --prefix ui install && npm --prefix ui run build && npm run companion:build",
-    "test": "node test/sequence-analyse.test.js && node test/sequence-engine.test.js",
+    "test": "node test/sequence-analyse.test.js && node test/sequence-engine.test.js && node test/artnet-announce.test.js && node test/artnet-devices.test.js",
     "companion:build": "node scripts/build-companion.js"
   },
   "engines": {
